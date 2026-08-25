@@ -27,17 +27,17 @@ Releases are built by GitHub Actions from signed or annotated version tags. The 
    ```
 
 3. Review the complete diff and merge it to the default branch.
-4. Create and push an annotated tag such as `v0.1.0`:
+4. Create and push the annotated beta tag:
 
    ```bash
-   git tag -a v0.1.0 -m "api-mcp v0.1.0"
-   git push origin v0.1.0
+   git tag -a v0.1.0-beta.1 -m "api-mcp v0.1.0-beta.1"
+   git push origin v0.1.0-beta.1
    ```
 
 5. Confirm the release workflow succeeds.
 6. Download one archive, verify it against `SHA256SUMS`, and run `api-mcp --version`. On macOS, also verify the signature with `codesign --verify --strict --verbose=2 api-mcp`.
 
-Tags containing a hyphen, such as `v0.2.0-beta.1`, are published as prereleases.
+Tags containing a hyphen, such as `v0.1.0-beta.1`, are published as prereleases. Keep the beta and AI-generated-code warning in the README and automated release notes until the project has undergone further independent review and is deliberately promoted to a stable release.
 
 The release workflow injects the tag version, source commit, and source commit timestamp into each executable. Do not publish locally built binaries as official release artifacts.
 

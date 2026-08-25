@@ -185,8 +185,10 @@ jobs:
           set -euo pipefail
           prerelease=()
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease+=(--prerelease); fi
+          release_notice='> **Beta / AI-generated code:** This is experimental beta software, and much of its code and documentation was generated with AI assistance under human direction and review. Test it with non-production credentials and data before relying on it.'
           gh release create "$GITHUB_REF_NAME" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --title "api-mcp $GITHUB_REF_NAME" \
+            --notes "$release_notice" \
             --generate-notes \
             "${prerelease[@]}"

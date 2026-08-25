@@ -1,5 +1,8 @@
 # api-mcp
 
+> [!WARNING]
+> **Beta / AI-generated code:** This is experimental beta software, and much of its code and documentation was generated with AI assistance under human direction and review. Automated tests, code signing, and notarization do not guarantee correctness or security. Review the source and test with non-production credentials and data before relying on it, especially before enabling write operations.
+
 `api-mcp` turns an OpenAPI 3.x document into a Model Context Protocol server. Each exposed OpenAPI operation becomes one MCP tool that forwards calls to the underlying HTTP endpoint.
 
 It runs locally over stdio, supports environment- and macOS Keychain-backed credentials, and can expose a fixed or user-managed subset of an API.
