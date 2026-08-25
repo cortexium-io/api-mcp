@@ -1,0 +1,22 @@
+{
+  "name": "petstore-mcp",
+  "spec": "./petstore-openapi.json",
+  "serverUrl": "https://petstore3.swagger.io/api/v3",
+  "auth": {
+    "type": "bearer",
+    "tokenEnv": "PETSTORE_API_TOKEN"
+  },
+  "headers": {
+    "User-Agent": "api-mcp/0.1.0"
+  },
+  "tools": {
+    "include": [
+      "get_pet_by_id",
+      "POST /pet"
+    ],
+    "exclude": [
+      "*delete*"
+    ]
+  },
+  "maxResponseChars": 20000
+}

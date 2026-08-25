@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "features": [
+    {
+      "id": "read-only",
+      "title": "Read-only access",
+      "description": "Read records without changing them.",
+      "risk": "read",
+      "endpoints": ["GET *"]
+    },
+    {
+      "id": "widget-writes",
+      "title": "Create and update widgets",
+      "description": "Create widgets and update existing widgets.",
+      "risk": "write",
+      "endpoints": ["create_widget", "update_widget"]
+    }
+  ]
+}

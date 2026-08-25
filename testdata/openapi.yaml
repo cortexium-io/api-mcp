@@ -1,0 +1,144 @@
+openapi: 3.1.0
+info:
+  title: Example Records API
+  version: 1.0.0
+servers:
+  - url: https://api.example.com/v1
+paths:
+  /account:
+    get:
+      operationId: getCurrentAccount
+      summary: Get the current account
+      responses:
+        "200":
+          description: Current account
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /widgets:
+    get:
+      operationId: listWidgets
+      summary: List widgets
+      tags: [widgets]
+      parameters:
+        - name: ownerId
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+        - name: X-Locale
+          in: header
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Widget list
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+    post:
+      operationId: createWidget
+      summary: Create a widget
+      tags: [widgets]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Created widget
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /widgets/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: include
+        in: query
+        schema:
+          type: string
+      - name: X-Locale
+        in: header
+        schema:
+          type: string
+    get:
+      operationId: getWidget
+      summary: Get a widget
+      tags: [widgets]
+      responses:
+        "200":
+          description: Widget
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+    put:
+      operationId: updateWidget
+      summary: Update a widget
+      tags: [widgets]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Updated widget
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+    delete:
+      operationId: deleteWidget
+      summary: Delete a widget
+      tags: [widgets]
+      responses:
+        "204":
+          description: Deleted widget
+  /widgets/{id}/actions:
+    post:
+      operationId: triggerWidgetAction
+      summary: Trigger a widget action
+      tags: [widgets]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Action result
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true

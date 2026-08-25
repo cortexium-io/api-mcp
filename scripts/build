@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+
+repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+output=${OUTPUT:-$repository_root/bin/api-mcp}
+version=${VERSION:-dev}
+
+if [ -n "${COMMIT:-}" ]; then
+  commit=$COMMIT
+elif git -C "$repository_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  commit=$(git -C "$repository_root" rev-parse --short=12 HEAD)
+else
+  commit=unknown
+fi
+
+if [ -n "${BUILD_DATE:-}" ]; then
+  build_date=$BUILD_DATE
+elif git -C "$repository_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  build_date=$(git -C "$repository_root" show -s --format=%cI HEAD)
+else
+  build_date=unknown
+fi
+
+mkdir -p "$(dirname -- "$output")"
+
+cd "$repository_root"
+go build -trimpath \
+  -ldflags "-s -w -X github.com/cortexium-io/api-mcp/internal/apimcp.DefaultVersion=$version -X main.commit=$commit -X main.buildDate=$build_date" \
+  -o "$output" \
+  ./cmd/api-mcp

@@ -1,0 +1,27 @@
+{
+  "name": "managed-api-mcp",
+  "spec": "../testdata/openapi.yaml",
+  "auth": {
+    "type": "apiKey",
+    "in": "headers",
+    "name": "X-API-Key",
+    "valueEnv": "EXAMPLE_API_KEY",
+    "keychain": {
+      "service": "api-mcp.example",
+      "account": "default",
+      "promptOnMissing": true
+    }
+  },
+  "toolPolicy": {
+    "userConfigDirectory": "Example API Plugin",
+    "userConfigFile": "config.json",
+    "catalog": "./features.example.json",
+    "defaultFeatures": ["read-only"]
+  },
+  "profiles": {
+    "registryFile": "accounts.json",
+    "defaultProfileId": "default",
+    "defaultProfileName": "Default API account"
+  },
+  "maxResponseChars": 20000
+}
