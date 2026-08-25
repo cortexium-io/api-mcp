@@ -26,6 +26,7 @@ type RequestBodyDescriptor struct {
 	Required     bool
 	Description  string
 	ContentTypes []string
+	Schemas      map[string]*openapi3.SchemaRef
 }
 
 type OperationDescriptor struct {
@@ -44,7 +45,7 @@ type OperationDescriptor struct {
 func LoadOperations(ctx context.Context, cfg Config) ([]OperationDescriptor, error) {
 	loader := openapi3.NewLoader()
 	loader.Context = ctx
-	loader.IsExternalRefsAllowed = true
+	loader.IsExternalRefsAllowed = cfg.AllowExternalRefs
 
 	var doc *openapi3.T
 	var err error
@@ -143,19 +144,25 @@ func BuildToolInputSchema(operation OperationDescriptor) map[string]any {
 			"type":        "string",
 			"description": description,
 		}
+		if len(operation.RequestBody.ContentTypes) > 0 {
+			properties["contentType"].(map[string]any)["enum"] = operation.RequestBody.ContentTypes
+		}
 		bodyDescription := operation.RequestBody.Description
 		if bodyDescription == "" {
 			bodyDescription = "Request body."
 		}
-		properties["body"] = map[string]any{"description": bodyDescription}
+		bodySchema := requestBodyJSONSchema(operation.RequestBody)
+		bodySchema["description"] = bodyDescription
+		properties["body"] = bodySchema
 		if operation.RequestBody.Required {
 			required = append(required, "body")
 		}
 	}
 
 	schema := map[string]any{
-		"type":       "object",
-		"properties": properties,
+		"type":                 "object",
+		"properties":           properties,
+		"additionalProperties": false,
 	}
 	if len(required) > 0 {
 		schema["required"] = required
@@ -237,14 +244,19 @@ func collectRequestBody(operation *openapi3.Operation) *RequestBodyDescriptor {
 	}
 	body := operation.RequestBody.Value
 	contentTypes := make([]string, 0, len(body.Content))
-	for contentType := range body.Content {
+	schemas := make(map[string]*openapi3.SchemaRef, len(body.Content))
+	for contentType, mediaType := range body.Content {
 		contentTypes = append(contentTypes, contentType)
+		if mediaType != nil {
+			schemas[contentType] = mediaType.Schema
+		}
 	}
 	sort.Strings(contentTypes)
 	return &RequestBodyDescriptor{
 		Required:     body.Required,
 		Description:  body.Description,
 		ContentTypes: contentTypes,
+		Schemas:      schemas,
 	}
 }
 
@@ -345,9 +357,10 @@ func parameterObjectSchema(parameters []ParameterDescriptor, description string)
 	}
 
 	result := map[string]any{
-		"type":        "object",
-		"description": description,
-		"properties":  properties,
+		"type":                 "object",
+		"description":          description,
+		"properties":           properties,
+		"additionalProperties": false,
 	}
 	if len(required) > 0 {
 		result["required"] = required
@@ -373,6 +386,37 @@ func schemaToJSONSchema(schema *openapi3.Schema) map[string]any {
 	if schema.Format != "" {
 		result["format"] = schema.Format
 	}
+	if schema.Const != nil {
+		result["const"] = schema.Const
+	}
+	if schema.Pattern != "" {
+		result["pattern"] = schema.Pattern
+	}
+	if schema.MinLength > 0 {
+		result["minLength"] = schema.MinLength
+	}
+	if schema.MaxLength != nil {
+		result["maxLength"] = *schema.MaxLength
+	}
+	if schema.Min != nil {
+		result["minimum"] = *schema.Min
+	}
+	if schema.Max != nil {
+		result["maximum"] = *schema.Max
+	}
+	if schema.MultipleOf != nil {
+		result["multipleOf"] = *schema.MultipleOf
+	}
+	if schema.UniqueItems {
+		result["uniqueItems"] = true
+	}
+	if schema.MinItems > 0 {
+		result["minItems"] = schema.MinItems
+	}
+	if schema.MaxItems != nil {
+		result["maxItems"] = *schema.MaxItems
+	}
+	addSchemaCompositions(result, schema)
 
 	types := schemaTypes(schema)
 	if len(types) > 0 {
@@ -416,6 +460,49 @@ func addObjectSchemaFields(result map[string]any, schema *openapi3.Schema) {
 	}
 	if len(schema.Required) > 0 {
 		result["required"] = schema.Required
+	}
+	if schema.AdditionalProperties.Has != nil {
+		result["additionalProperties"] = *schema.AdditionalProperties.Has
+	} else if schema.AdditionalProperties.Schema != nil {
+		result["additionalProperties"] = schemaRefToJSONSchema(schema.AdditionalProperties.Schema)
+	}
+}
+
+func requestBodyJSONSchema(body *RequestBodyDescriptor) map[string]any {
+	if body == nil || len(body.Schemas) == 0 {
+		return map[string]any{}
+	}
+	items := make([]any, 0, len(body.ContentTypes))
+	for _, contentType := range body.ContentTypes {
+		if schema := schemaRefToJSONSchema(body.Schemas[contentType]); len(schema) > 0 {
+			items = append(items, schema)
+		}
+	}
+	if len(items) == 0 {
+		return map[string]any{}
+	}
+	if len(items) == 1 {
+		return items[0].(map[string]any)
+	}
+	return map[string]any{"anyOf": items}
+}
+
+func addSchemaCompositions(result map[string]any, schema *openapi3.Schema) {
+	add := func(name string, refs openapi3.SchemaRefs) {
+		if len(refs) == 0 {
+			return
+		}
+		items := make([]any, 0, len(refs))
+		for _, ref := range refs {
+			items = append(items, schemaRefToJSONSchema(ref))
+		}
+		result[name] = items
+	}
+	add("oneOf", schema.OneOf)
+	add("anyOf", schema.AnyOf)
+	add("allOf", schema.AllOf)
+	if schema.Not != nil {
+		result["not"] = schemaRefToJSONSchema(schema.Not)
 	}
 }
 

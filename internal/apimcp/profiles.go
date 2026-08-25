@@ -208,9 +208,7 @@ func (m *profileManager) validateRegistry(registry ProfileRegistry) error {
 
 func (m *profileManager) newRuntime(profile APIProfile) (*apiProfileRuntime, error) {
 	policyConfig := m.basePolicy
-	if profile.ID != m.config.DefaultProfileID {
-		policyConfig.UserConfigPath = filepath.Join(m.config.ProfilesDirectory, profile.ID, "tools.json")
-	}
+	policyConfig.UserConfigPath = m.policyPath(profile.ID)
 	policy, err := newToolPolicyManager(policyConfig, m.operations)
 	if err != nil {
 		return nil, err
@@ -301,21 +299,41 @@ func (r *apiProfileRuntime) status() (APIProfileStatus, error) {
 	}, nil
 }
 
-func (m *profileManager) add(ctx context.Context, profile APIProfile) (APIProfileStatus, error) {
+func (m *profileManager) previewAdd(profile APIProfile, restoreToolConfiguration bool) error {
 	profile.ID = strings.TrimSpace(profile.ID)
 	profile.Name = strings.TrimSpace(profile.Name)
 	if err := validateProfileID(profile.ID); err != nil {
-		return APIProfileStatus{}, err
+		return err
 	}
 	if err := validateProfileName(profile.Name); err != nil {
-		return APIProfileStatus{}, err
+		return err
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, exists := m.runtimes[profile.ID]; exists {
-		return APIProfileStatus{}, fmt.Errorf("profile %q already exists", profile.ID)
+		return fmt.Errorf("profile %q already exists", profile.ID)
 	}
+	policyPath := m.policyPath(profile.ID)
+	_, err := os.Stat(policyPath)
+	if err == nil && !restoreToolConfiguration {
+		return fmt.Errorf("a preserved tool configuration exists for profile %q; set restoreToolConfiguration to true to restore it explicitly, or use a new profile ID for safe defaults", profile.ID)
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect preserved tool configuration for profile %q: %w", profile.ID, err)
+	}
+	return nil
+}
+
+func (m *profileManager) add(ctx context.Context, profile APIProfile, restoreToolConfiguration bool) (APIProfileStatus, error) {
+	if err := m.previewAdd(profile, restoreToolConfiguration); err != nil {
+		return APIProfileStatus{}, err
+	}
+	profile.ID = strings.TrimSpace(profile.ID)
+	profile.Name = strings.TrimSpace(profile.Name)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	previous := cloneProfileRegistry(m.registry)
 	next := cloneProfileRegistry(m.registry)
 	next.Profiles = append(next.Profiles, profile)
@@ -324,7 +342,7 @@ func (m *profileManager) add(ctx context.Context, profile APIProfile) (APIProfil
 		return APIProfileStatus{}, fmt.Errorf("save profile registry: %w", err)
 	}
 
-	policyPath := filepath.Join(m.config.ProfilesDirectory, profile.ID, "tools.json")
+	policyPath := m.policyPath(profile.ID)
 	_, statErr := os.Stat(policyPath)
 	policyExisted := statErr == nil
 	runtime, err := m.newRuntime(profile)
@@ -345,6 +363,13 @@ func (m *profileManager) add(ctx context.Context, profile APIProfile) (APIProfil
 	m.registry = next
 	m.runtimes[profile.ID] = runtime
 	return runtime.status()
+}
+
+func (m *profileManager) policyPath(profileID string) string {
+	if profileID == m.config.DefaultProfileID {
+		return m.basePolicy.UserConfigPath
+	}
+	return filepath.Join(m.config.ProfilesDirectory, profileID, "tools.json")
 }
 
 func (m *profileManager) rename(profileID, name string) (APIProfile, error) {
@@ -383,12 +408,12 @@ func (m *profileManager) remove(profileID string, deleteCredential, deleteToolCo
 	profileID = strings.TrimSpace(profileID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.previewRemoveLocked(profileID); err != nil {
+		return APIProfileRemoval{}, err
+	}
 	runtime, ok := m.runtimes[profileID]
 	if !ok {
 		return APIProfileRemoval{}, fmt.Errorf("unknown profile %q", profileID)
-	}
-	if len(m.runtimes) == 1 {
-		return APIProfileRemoval{}, errors.New("cannot remove the last API profile")
 	}
 	next := cloneProfileRegistry(m.registry)
 	next.Profiles = removeProfile(next.Profiles, profileID)
@@ -418,6 +443,23 @@ func (m *profileManager) remove(profileID string, deleteCredential, deleteToolCo
 		}
 	}
 	return result, nil
+}
+
+func (m *profileManager) previewRemove(profileID string) error {
+	profileID = strings.TrimSpace(profileID)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.previewRemoveLocked(profileID)
+}
+
+func (m *profileManager) previewRemoveLocked(profileID string) error {
+	if _, ok := m.runtimes[profileID]; !ok {
+		return fmt.Errorf("unknown profile %q", profileID)
+	}
+	if len(m.runtimes) == 1 {
+		return errors.New("cannot remove the last API profile")
+	}
+	return nil
 }
 
 func (m *profileManager) allowsAny(operation OperationDescriptor) bool {

@@ -13,6 +13,7 @@ It runs locally over stdio, supports environment- and macOS Keychain-backed cred
 - Keep API credentials outside model-visible configuration and tool arguments.
 - Start managed configurations read-only and let users explicitly enable named features or individual endpoints.
 - Isolate credentials and tool policies across multiple local account profiles.
+- Require a local native macOS approval for policy/profile changes and every non-read API request.
 - Redact exact configured credential values from upstream responses and errors.
 
 `api-mcp` is an independent open-source project. It is not affiliated with OpenAI, Anthropic, or any API provider used with it.
@@ -102,7 +103,17 @@ Create `api-mcp.config.json` or pass `--config path/to/config.json`.
 }
 ```
 
-`spec` may be a local file path or an HTTP URL. `serverUrl` is optional; when omitted, the first matching OpenAPI `servers` entry is used.
+`spec` is a local file path by default. Remote documents require an explicit trust decision:
+
+```json
+{
+  "spec": "https://docs.example.com/openapi.json",
+  "allowRemoteSpec": true,
+  "serverUrl": "https://api.example.com"
+}
+```
+
+Remote specs must use HTTPS. External `$ref` loading is disabled by default and requires `"allowExternalRefs": true`. When authentication is enabled with either a remote spec or external references, `serverUrl` is required so remotely controlled OpenAPI content cannot redirect credentials to another destination. For local single-file specs, `serverUrl` remains optional and the first matching OpenAPI `servers` entry is used.
 
 ## Auth
 
@@ -238,7 +249,7 @@ With `toolPolicy` enabled, the MCP adds these management tools:
 - `search_available_tools`: search all OpenAPI operations and report their purpose and enabled state.
 - `configure_tools`: add or remove named features and endpoint selectors, save atomically, and refresh the live MCP tool list.
 
-`configure_tools` is the only tool that mutates the policy. Its input accepts `addFeatures`, `removeFeatures`, `addEndpoints`, and `removeEndpoints`. MCP instructions or a companion skill should require the assistant to explain the requested access change and obtain explicit confirmation before calling it. Tool availability is separate from authorization to perform an API write.
+`configure_tools` is the only tool that mutates the policy. Its input accepts `addFeatures`, `removeFeatures`, `addEndpoints`, and `removeEndpoints`. Before saving, api-mcp opens a native macOS approval dialog that shows the exact requested change and resulting policy. Approval is handled locally by the server rather than by a model-supplied flag or token. Tool availability is separate from authorization to perform an API write.
 
 Manual edits are loaded on server start. Changes made through `configure_tools` take effect immediately.
 
@@ -279,7 +290,7 @@ New profiles use a derived Keychain account named `profile:<profile-id>` and a p
 Profile-aware servers add these tools:
 
 - `list_api_profiles`: list profiles, credential availability, policy paths, and enabled endpoint counts.
-- `add_api_profile`: create a profile and open the native secure credential prompt. New IDs use the default policy; reusing a removed ID restores a preserved policy file.
+- `add_api_profile`: create a profile and open the native secure credential prompt. New IDs use the default policy. A preserved policy is never restored implicitly; the caller must pass `restoreToolConfiguration: true`, and the local approval dialog shows that choice.
 - `rename_api_profile`: change the friendly name without changing credentials or policy.
 - `remove_api_profile`: remove a profile, with separate opt-in deletion of its Keychain item and policy file.
 - `api_mcp_credential_status` and `api_mcp_setup_credential`: inspect or set up the selected profile's credential.
@@ -289,7 +300,7 @@ Generated API tools also accept `profile`. It is optional while exactly one prof
 
 The MCP tool list is the union of operations enabled by all configured profiles. Before resolving a credential or sending HTTP, the server checks the selected profile's own policy and rejects tools disabled there. Therefore a write tool enabled for one account may be visible to all clients, but it cannot be executed against another account unless that account's policy also enables it.
 
-Profile and policy mutations update the current server process immediately. Other already-running api-mcp processes should be restarted to reload changes made by another client or by manual file edits.
+Adding, renaming, or removing a profile also requires a separate native macOS approval showing the selected account and exact arguments. Profile and policy mutations update the current server process immediately. Other already-running api-mcp processes should be restarted to reload changes made by another client or by manual file edits.
 
 ## Tool Input
 
@@ -306,7 +317,7 @@ Generated tools use a stable input shape:
 }
 ```
 
-OpenAPI parameters are grouped by location. Auth credentials are applied from config and are not exposed as tool inputs.
+OpenAPI parameters are grouped by location. Generated tools reject undeclared top-level fields, undeclared parameters, missing required values, unsupported content types, and parameter/body values that fail their OpenAPI schemas before resolving credentials or sending HTTP. Auth credentials are applied from config and are not exposed as tool inputs.
 
 ## Run
 
@@ -319,9 +330,11 @@ For MCP clients, point the command at `/absolute/path/to/bin/api-mcp --config /a
 
 ## Security model
 
-The OpenAPI document and configuration are trusted local inputs. Generated tools enforce the configured allowlist before resolving credentials or making an HTTP request. Managed policy files are created with owner-only permissions and replaced atomically.
+Local OpenAPI documents and configuration are trusted inputs. Remote OpenAPI loading and external references are explicit opt-ins, and authenticated remote configurations must pin `serverUrl`. Generated tools enforce input schemas and the configured allowlist before resolving credentials or making an HTTP request. Managed policy files are created with owner-only permissions and replaced atomically.
 
-The model never needs to receive a Keychain-backed secret: credential setup uses the local terminal or native macOS secure-input dialog, and management tools report only presence or absence. Exact credential values are redacted from upstream response bodies and errors as a defense in depth; API responses should still be treated as potentially sensitive.
+On macOS, every non-read HTTP operation and every policy/profile mutation opens a local native approval dialog after validation and before credentials or side effects. Reads and credential status remain non-interactive. Credential setup uses its own hidden-input dialog. Non-macOS builds fail closed for actions that require native approval; environment-backed read-only API access remains available.
+
+The model never needs to receive a Keychain-backed secret: credential setup uses the local terminal or native macOS secure-input dialog, and management tools report only presence or absence. Exact credentials and environment-substituted secret atoms in custom auth headers are redacted from upstream response bodies and errors as defense in depth; API responses should still be treated as potentially sensitive.
 
 For vulnerabilities, see [SECURITY.md](SECURITY.md).
 

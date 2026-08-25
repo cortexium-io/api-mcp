@@ -18,7 +18,7 @@ type searchAvailableToolsInput struct {
 	Limit       int    `json:"limit,omitempty"`
 }
 
-func addToolPolicyTools(server *mcp.Server, policy *toolPolicyManager, registry *operationToolRegistry) {
+func addToolPolicyTools(server *mcp.Server, policy *toolPolicyManager, registry *operationToolRegistry, confirmer ActionConfirmer) {
 	closedWorld := false
 	destructive := true
 	emptySchema := strictEmptyObjectSchema()
@@ -108,12 +108,26 @@ func addToolPolicyTools(server *mcp.Server, policy *toolPolicyManager, registry 
 			"additionalProperties": false,
 		},
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: &destructive, OpenWorldHint: &closedWorld},
-	}, func(_ context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		configureMu.Lock()
 		defer configureMu.Unlock()
 		var input ConfigureToolsInput
 		if err := decodeStrictToolInput(req, &input); err != nil {
 			return toolError("invalid tool arguments: " + err.Error()), nil
+		}
+		next, err := policy.previewConfigure(input)
+		if err != nil {
+			return toolError(err.Error()), nil
+		}
+		if err := confirmer.Confirm(ctx, ActionConfirmation{
+			ApplicationName: registry.config.Name,
+			Action:          "Change available API tools",
+			Details: map[string]any{
+				"requestedChanges": input,
+				"resultingPolicy":  next,
+			},
+		}); err != nil {
+			return toolError(actionConfirmationError(err)), nil
 		}
 		current, filter, err := policy.configure(input)
 		if err != nil {

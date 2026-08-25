@@ -2,6 +2,7 @@ package apimcp
 
 import (
 	"context"
+	"strings"
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -12,8 +13,9 @@ type profileSelectorInput struct {
 }
 
 type addProfileInput struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID                       string `json:"id"`
+	Name                     string `json:"name"`
+	RestoreToolConfiguration bool   `json:"restoreToolConfiguration,omitempty"`
 }
 
 type renameProfileInput struct {
@@ -42,7 +44,7 @@ type profileConfigureToolsInput struct {
 	RemoveEndpoints []string `json:"removeEndpoints,omitempty"`
 }
 
-func addProfileTools(server *mcp.Server, profiles *profileManager, registry *operationToolRegistry) {
+func addProfileTools(server *mcp.Server, profiles *profileManager, registry *operationToolRegistry, confirmer ActionConfirmer) {
 	closedWorld := false
 	destructive := true
 	nonDestructive := false
@@ -71,12 +73,13 @@ func addProfileTools(server *mcp.Server, profiles *profileManager, registry *ope
 	server.AddTool(&mcp.Tool{
 		Name:        addProfileToolName,
 		Title:       "Add API account profile",
-		Description: "Add a local API account profile, then open the native secure-input dialog to store that account's credential directly in Keychain. A new ID starts with the configured default policy; reusing a removed ID restores its preserved policy file if it was not deleted. Before calling, explain what will be created or restored and obtain explicit user confirmation. Never accept the credential as an argument.",
+		Description: "Add a local API account profile, then open the native secure-input dialog to store that account's credential directly in Keychain. A new ID starts with the configured default policy. Restoring a preserved policy requires restoreToolConfiguration=true. A separate native approval dialog shows the exact profile change before anything is written. Never accept the credential as an argument.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"id":   map[string]any{"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$", "description": "Stable lowercase profile ID, such as `company-a`."},
-				"name": map[string]any{"type": "string", "minLength": 1, "maxLength": 100, "description": "Friendly account name shown in tool results and secure credential prompts."},
+				"id":                       map[string]any{"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$", "description": "Stable lowercase profile ID, such as `company-a`."},
+				"name":                     map[string]any{"type": "string", "minLength": 1, "maxLength": 100, "description": "Friendly account name shown in tool results and secure credential prompts."},
+				"restoreToolConfiguration": map[string]any{"type": "boolean", "description": "Explicitly restore a preserved policy file for this ID. Defaults to false and is required when a preserved file exists."},
 			},
 			"required":             []string{"id", "name"},
 			"additionalProperties": false,
@@ -89,7 +92,23 @@ func addProfileTools(server *mcp.Server, profiles *profileManager, registry *ope
 		if err := decodeStrictToolInput(req, &input); err != nil {
 			return toolError("invalid tool arguments: " + err.Error()), nil
 		}
-		status, err := profiles.add(ctx, APIProfile{ID: input.ID, Name: input.Name})
+		profile := APIProfile{ID: strings.TrimSpace(input.ID), Name: strings.TrimSpace(input.Name)}
+		if err := profiles.previewAdd(profile, input.RestoreToolConfiguration); err != nil {
+			return toolError(err.Error()), nil
+		}
+		if err := confirmer.Confirm(ctx, ActionConfirmation{
+			ApplicationName: registry.config.Name,
+			Profile:         &profile,
+			Action:          "Add API account profile",
+			Details: map[string]any{
+				"id":                       profile.ID,
+				"name":                     profile.Name,
+				"restoreToolConfiguration": input.RestoreToolConfiguration,
+			},
+		}); err != nil {
+			return toolError(actionConfirmationError(err)), nil
+		}
+		status, err := profiles.add(ctx, profile, input.RestoreToolConfiguration)
 		if err != nil {
 			return toolError(err.Error()), nil
 		}
@@ -100,7 +119,7 @@ func addProfileTools(server *mcp.Server, profiles *profileManager, registry *ope
 	server.AddTool(&mcp.Tool{
 		Name:        renameProfileToolName,
 		Title:       "Rename API account profile",
-		Description: "Change a profile's friendly display name. Its stable ID, Keychain credential, and tool policy remain unchanged.",
+		Description: "Change a profile's friendly display name. Its stable ID, Keychain credential, and tool policy remain unchanged. A native approval dialog shows the exact rename before it is saved.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -111,14 +130,32 @@ func addProfileTools(server *mcp.Server, profiles *profileManager, registry *ope
 			"additionalProperties": false,
 		},
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: &nonDestructive, OpenWorldHint: &closedWorld},
-	}, func(_ context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		mutationMu.Lock()
 		defer mutationMu.Unlock()
 		var input renameProfileInput
 		if err := decodeStrictToolInput(req, &input); err != nil {
 			return toolError("invalid tool arguments: " + err.Error()), nil
 		}
-		profile, err := profiles.rename(input.Profile, input.Name)
+		input.Profile = strings.TrimSpace(input.Profile)
+		input.Name = strings.TrimSpace(input.Name)
+		if err := validateProfileName(input.Name); err != nil {
+			return toolError(err.Error()), nil
+		}
+		runtime, err := profiles.resolve(input.Profile)
+		if err != nil {
+			return toolError(err.Error()), nil
+		}
+		profile := runtime.profile
+		if err := confirmer.Confirm(ctx, ActionConfirmation{
+			ApplicationName: registry.config.Name,
+			Profile:         &profile,
+			Action:          "Rename API account profile",
+			Details:         input,
+		}); err != nil {
+			return toolError(actionConfirmationError(err)), nil
+		}
+		profile, err = profiles.rename(input.Profile, input.Name)
 		if err != nil {
 			return toolError(err.Error()), nil
 		}
@@ -128,7 +165,7 @@ func addProfileTools(server *mcp.Server, profiles *profileManager, registry *ope
 	server.AddTool(&mcp.Tool{
 		Name:        removeProfileToolName,
 		Title:       "Remove API account profile",
-		Description: "Remove a local API account profile. Before calling, explain whether its Keychain credential and tool-policy file will also be deleted and obtain explicit user confirmation. At least one profile must remain. Omitted deletion options preserve the credential and policy for recovery.",
+		Description: "Remove a local API account profile. A native approval dialog shows whether its Keychain credential and tool-policy file will also be deleted. At least one profile must remain. Omitted deletion options preserve the credential and policy for recovery.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -140,12 +177,29 @@ func addProfileTools(server *mcp.Server, profiles *profileManager, registry *ope
 			"additionalProperties": false,
 		},
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: &destructive, OpenWorldHint: &closedWorld},
-	}, func(_ context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		mutationMu.Lock()
 		defer mutationMu.Unlock()
 		var input removeProfileInput
 		if err := decodeStrictToolInput(req, &input); err != nil {
 			return toolError("invalid tool arguments: " + err.Error()), nil
+		}
+		input.Profile = strings.TrimSpace(input.Profile)
+		if err := profiles.previewRemove(input.Profile); err != nil {
+			return toolError(err.Error()), nil
+		}
+		runtime, err := profiles.resolve(input.Profile)
+		if err != nil {
+			return toolError(err.Error()), nil
+		}
+		profile := runtime.profile
+		if err := confirmer.Confirm(ctx, ActionConfirmation{
+			ApplicationName: registry.config.Name,
+			Profile:         &profile,
+			Action:          "Remove API account profile",
+			Details:         input,
+		}); err != nil {
+			return toolError(actionConfirmationError(err)), nil
 		}
 		removed, err := profiles.remove(input.Profile, input.DeleteCredential, input.DeleteToolConfiguration)
 		if err != nil {
@@ -202,10 +256,10 @@ func addProfileTools(server *mcp.Server, profiles *profileManager, registry *ope
 		}), nil
 	})
 
-	addProfileToolPolicyTools(server, profiles, registry, &mutationMu, closedWorld, destructive)
+	addProfileToolPolicyTools(server, profiles, registry, confirmer, &mutationMu, closedWorld, destructive)
 }
 
-func addProfileToolPolicyTools(server *mcp.Server, profiles *profileManager, registry *operationToolRegistry, mutationMu *sync.Mutex, closedWorld, destructive bool) {
+func addProfileToolPolicyTools(server *mcp.Server, profiles *profileManager, registry *operationToolRegistry, confirmer ActionConfirmer, mutationMu *sync.Mutex, closedWorld, destructive bool) {
 	server.AddTool(&mcp.Tool{
 		Name:        toolConfigurationToolName,
 		Title:       "Get profile tool configuration",
@@ -286,7 +340,7 @@ func addProfileToolPolicyTools(server *mcp.Server, profiles *profileManager, reg
 	server.AddTool(&mcp.Tool{
 		Name:        configureToolsToolName,
 		Title:       "Configure profile tools",
-		Description: "Update tool availability for one account profile by enabling or disabling named features and endpoint selectors. Before calling, identify the exact profile, explain the exact access change, call out any write capability, and obtain explicit user confirmation. Changes take effect immediately.",
+		Description: "Update tool availability for one account profile by enabling or disabling named features and endpoint selectors. A native approval dialog identifies the profile and shows the exact resulting policy before it is saved. Changes take effect immediately.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -299,7 +353,7 @@ func addProfileToolPolicyTools(server *mcp.Server, profiles *profileManager, reg
 			"additionalProperties": false,
 		},
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: &destructive, OpenWorldHint: &closedWorld},
-	}, func(_ context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		mutationMu.Lock()
 		defer mutationMu.Unlock()
 		var input profileConfigureToolsInput
@@ -310,12 +364,29 @@ func addProfileToolPolicyTools(server *mcp.Server, profiles *profileManager, reg
 		if err != nil {
 			return toolError(err.Error()), nil
 		}
-		current, _, err := runtime.policy.configure(ConfigureToolsInput{
+		change := ConfigureToolsInput{
 			AddFeatures:     input.AddFeatures,
 			RemoveFeatures:  input.RemoveFeatures,
 			AddEndpoints:    input.AddEndpoints,
 			RemoveEndpoints: input.RemoveEndpoints,
-		})
+		}
+		next, err := runtime.policy.previewConfigure(change)
+		if err != nil {
+			return toolError(err.Error()), nil
+		}
+		profile := runtime.profile
+		if err := confirmer.Confirm(ctx, ActionConfirmation{
+			ApplicationName: registry.config.Name,
+			Profile:         &profile,
+			Action:          "Change available API tools",
+			Details: map[string]any{
+				"requestedChanges": input,
+				"resultingPolicy":  next,
+			},
+		}); err != nil {
+			return toolError(actionConfirmationError(err)), nil
+		}
+		current, _, err := runtime.policy.configure(change)
 		if err != nil {
 			return toolError(err.Error()), nil
 		}

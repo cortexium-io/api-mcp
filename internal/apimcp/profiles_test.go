@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -49,7 +50,7 @@ func TestProfileManagerMigratesExistingDefaultAndIsolatesNewProfile(t *testing.T
 		t.Fatalf("default policy path = %q, want %q", defaultPath, cfg.ToolPolicy.UserConfigPath)
 	}
 
-	status, err := manager.add(context.Background(), APIProfile{ID: "company-b", Name: "Company B"})
+	status, err := manager.add(context.Background(), APIProfile{ID: "company-b", Name: "Company B"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +120,7 @@ func TestProfileManagerRollsBackCanceledProfileSetup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = manager.add(context.Background(), APIProfile{ID: "canceled", Name: "Canceled Company"})
+	_, err = manager.add(context.Background(), APIProfile{ID: "canceled", Name: "Canceled Company"}, false)
 	if err == nil || err.Error() != "credential setup was canceled; no credential was stored" {
 		t.Fatalf("unexpected add error: %v", err)
 	}
@@ -153,6 +154,46 @@ func TestProfileManagerRefusesToRemoveLastProfile(t *testing.T) {
 	}
 	if _, err := manager.remove("default", false, false); err == nil {
 		t.Fatal("expected last-profile removal to fail")
+	}
+}
+
+func TestProfileManagerRequiresExplicitPreservedPolicyRestore(t *testing.T) {
+	cfg, _ := newTestProfileConfig(t)
+	store := &fakeKeychainStore{values: map[string][]byte{}}
+	manager, err := newProfileManager(cfg, testToolPolicyOperations(), store, &fakeCredentialPrompter{value: []byte("company-b-secret")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := APIProfile{ID: "company-b", Name: "Company B"}
+	if _, err := manager.add(context.Background(), profile, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.remove(profile.ID, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.previewAdd(profile, false); err == nil || !strings.Contains(err.Error(), "restoreToolConfiguration") {
+		t.Fatalf("implicit restore error = %v", err)
+	}
+	if err := manager.previewAdd(profile, true); err != nil {
+		t.Fatalf("explicit restore was rejected: %v", err)
+	}
+}
+
+func TestProfileManagerRequiresExplicitRestoreForRemovedDefaultProfile(t *testing.T) {
+	cfg, _ := newTestProfileConfig(t)
+	manager, err := newProfileManager(cfg, testToolPolicyOperations(), &fakeKeychainStore{values: map[string][]byte{}}, &fakeCredentialPrompter{value: []byte("company-b-secret")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.add(context.Background(), APIProfile{ID: "company-b", Name: "Company B"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.remove("default", false, false); err != nil {
+		t.Fatal(err)
+	}
+	defaultProfile := APIProfile{ID: "default", Name: "Default Company"}
+	if err := manager.previewAdd(defaultProfile, false); err == nil || !strings.Contains(err.Error(), "restoreToolConfiguration") {
+		t.Fatalf("implicit default-profile restore error = %v", err)
 	}
 }
 

@@ -208,6 +208,34 @@ func TestExecuteOperationRedactsAuthFromResponseHeadersAndBody(t *testing.T) {
 	}
 }
 
+func TestExecuteOperationRedactsSecretAtomsFromCompositeAuthHeaders(t *testing.T) {
+	cfg := testHTTPConfig
+	cfg.Auth = ResolvedAuthConfig{
+		Type:            "headers",
+		Headers:         map[string]string{"X-Custom-Auth": "Token top-secret-token; tenant=public"},
+		RedactionValues: []string{"top-secret-token"},
+	}
+	client := roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: 200,
+			Status:     "200 OK",
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       ioNopCloser(`{"echo":"top-secret-token"}`),
+		}, nil
+	})
+	response, err := ExecuteOperation(context.Background(), testOperation, ToolInput{Path: map[string]any{"petId": 123}}, cfg, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "top-secret-token") || !strings.Contains(string(data), "[REDACTED]") {
+		t.Fatalf("composite auth secret was not redacted: %s", data)
+	}
+}
+
 func TestExecuteOperationRedactsAuthFromResponseReadErrors(t *testing.T) {
 	cfg := testHTTPConfig
 	cfg.Auth = ResolvedAuthConfig{Type: "bearer", Token: "top-secret-token"}

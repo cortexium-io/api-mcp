@@ -14,7 +14,8 @@ You should receive an acknowledgement within seven days. We will coordinate vali
 
 ## Security boundaries
 
-- OpenAPI documents and server configuration are trusted local inputs.
+- Local OpenAPI documents and server configuration are trusted inputs. Remote specs and external references require explicit opt-in; authenticated configurations using them must pin `serverUrl`.
 - API responses are untrusted and may contain sensitive data even when credentials are redacted.
 - Keychain integration protects credential storage and model visibility; it does not make a compromised local user account or executable safe.
-- A tool allowlist limits which requests api-mcp can generate. It is not a substitute for least-privilege credentials or upstream API authorization.
+- Generated tools reject input not declared by the OpenAPI operation, and a tool allowlist limits which operations api-mcp can generate. Neither is a substitute for least-privilege credentials or upstream API authorization.
+- On macOS, non-read API calls and policy/profile changes require approval in a native local dialog after validation and before credentials or side effects. This is server-enforced and does not trust a confirmation flag supplied by an MCP client or model. Other platforms fail closed for these actions.

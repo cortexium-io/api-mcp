@@ -246,24 +246,45 @@ func (m *toolPolicyManager) filterLocked() ToolFilterConfig {
 func (m *toolPolicyManager) configure(input ConfigureToolsInput) (UserToolPolicy, ToolFilterConfig, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	next, err := m.nextPolicyLocked(input)
+	if err != nil {
+		return UserToolPolicy{}, ToolFilterConfig{}, err
+	}
+	if err := writeJSONFileAtomically(m.config.UserConfigPath, next, false); err != nil {
+		return UserToolPolicy{}, ToolFilterConfig{}, fmt.Errorf("save user tool configuration: %w", err)
+	}
+	m.policy = next
+	return cloneUserToolPolicy(next), m.filterLocked(), nil
+}
 
+func (m *toolPolicyManager) previewConfigure(input ConfigureToolsInput) (UserToolPolicy, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	next, err := m.nextPolicyLocked(input)
+	if err != nil {
+		return UserToolPolicy{}, err
+	}
+	return cloneUserToolPolicy(next), nil
+}
+
+func (m *toolPolicyManager) nextPolicyLocked(input ConfigureToolsInput) (UserToolPolicy, error) {
 	input.AddFeatures = normalizeStringList(input.AddFeatures)
 	input.RemoveFeatures = normalizeStringList(input.RemoveFeatures)
 	input.AddEndpoints = normalizeStringList(input.AddEndpoints)
 	input.RemoveEndpoints = normalizeStringList(input.RemoveEndpoints)
 	if len(input.AddFeatures)+len(input.RemoveFeatures)+len(input.AddEndpoints)+len(input.RemoveEndpoints) == 0 {
-		return UserToolPolicy{}, ToolFilterConfig{}, errors.New("configure_tools requires at least one requested change")
+		return UserToolPolicy{}, errors.New("configure_tools requires at least one requested change")
 	}
 	if overlap := firstOverlap(input.AddFeatures, input.RemoveFeatures); overlap != "" {
-		return UserToolPolicy{}, ToolFilterConfig{}, fmt.Errorf("feature %q cannot be added and removed in the same request", overlap)
+		return UserToolPolicy{}, fmt.Errorf("feature %q cannot be added and removed in the same request", overlap)
 	}
 	if overlap := firstOverlap(input.AddEndpoints, input.RemoveEndpoints); overlap != "" {
-		return UserToolPolicy{}, ToolFilterConfig{}, fmt.Errorf("endpoint %q cannot be added and removed in the same request", overlap)
+		return UserToolPolicy{}, fmt.Errorf("endpoint %q cannot be added and removed in the same request", overlap)
 	}
 	features := m.featureMap()
 	for _, id := range append(append([]string(nil), input.AddFeatures...), input.RemoveFeatures...) {
 		if _, ok := features[id]; !ok {
-			return UserToolPolicy{}, ToolFilterConfig{}, fmt.Errorf("unknown feature %q", id)
+			return UserToolPolicy{}, fmt.Errorf("unknown feature %q", id)
 		}
 	}
 
@@ -273,13 +294,9 @@ func (m *toolPolicyManager) configure(input ConfigureToolsInput) (UserToolPolicy
 	next.DisabledEndpoints = applySetChanges(next.DisabledEndpoints, input.RemoveEndpoints, input.AddEndpoints)
 	next = normalizeUserToolPolicy(next)
 	if err := m.validatePolicy(next); err != nil {
-		return UserToolPolicy{}, ToolFilterConfig{}, err
+		return UserToolPolicy{}, err
 	}
-	if err := writeJSONFileAtomically(m.config.UserConfigPath, next, false); err != nil {
-		return UserToolPolicy{}, ToolFilterConfig{}, fmt.Errorf("save user tool configuration: %w", err)
-	}
-	m.policy = next
-	return cloneUserToolPolicy(next), m.filterLocked(), nil
+	return next, nil
 }
 
 func (m *toolPolicyManager) snapshot() (UserToolPolicy, string) {

@@ -267,6 +267,9 @@ func authRedactionValues(auth ResolvedAuthConfig) []string {
 	case "apiKey":
 		add(auth.Value)
 	case "headers":
+		for _, value := range auth.RedactionValues {
+			add(value)
+		}
 		for _, value := range auth.Headers {
 			add(value)
 		}

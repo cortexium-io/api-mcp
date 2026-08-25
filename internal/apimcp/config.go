@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -38,6 +39,7 @@ type ResolvedAuthConfig struct {
 	Name              string
 	Value             string
 	Headers           map[string]string
+	RedactionValues   []string
 	Keychain          *KeychainConfig
 	CredentialMissing bool
 }
@@ -69,29 +71,33 @@ type ResolvedProfilesConfig struct {
 }
 
 type ConfigInput struct {
-	Name             string            `json:"name,omitempty"`
-	Version          string            `json:"version,omitempty"`
-	Spec             string            `json:"spec"`
-	ServerURL        string            `json:"serverUrl,omitempty"`
-	Auth             *AuthConfig       `json:"auth,omitempty"`
-	Headers          map[string]string `json:"headers,omitempty"`
-	Tools            ToolFilterConfig  `json:"tools,omitempty"`
-	ToolPolicy       *ToolPolicyConfig `json:"toolPolicy,omitempty"`
-	Profiles         *ProfilesConfig   `json:"profiles,omitempty"`
-	MaxResponseChars int               `json:"maxResponseChars,omitempty"`
+	Name              string            `json:"name,omitempty"`
+	Version           string            `json:"version,omitempty"`
+	Spec              string            `json:"spec"`
+	AllowRemoteSpec   bool              `json:"allowRemoteSpec,omitempty"`
+	AllowExternalRefs bool              `json:"allowExternalRefs,omitempty"`
+	ServerURL         string            `json:"serverUrl,omitempty"`
+	Auth              *AuthConfig       `json:"auth,omitempty"`
+	Headers           map[string]string `json:"headers,omitempty"`
+	Tools             ToolFilterConfig  `json:"tools,omitempty"`
+	ToolPolicy        *ToolPolicyConfig `json:"toolPolicy,omitempty"`
+	Profiles          *ProfilesConfig   `json:"profiles,omitempty"`
+	MaxResponseChars  int               `json:"maxResponseChars,omitempty"`
 }
 
 type Config struct {
-	Name             string
-	Version          string
-	Spec             string
-	ServerURL        string
-	Auth             ResolvedAuthConfig
-	Headers          map[string]string
-	Tools            ToolFilterConfig
-	ToolPolicy       *ResolvedToolPolicyConfig
-	Profiles         *ResolvedProfilesConfig
-	MaxResponseChars int
+	Name              string
+	Version           string
+	Spec              string
+	AllowRemoteSpec   bool
+	AllowExternalRefs bool
+	ServerURL         string
+	Auth              ResolvedAuthConfig
+	Headers           map[string]string
+	Tools             ToolFilterConfig
+	ToolPolicy        *ResolvedToolPolicyConfig
+	Profiles          *ResolvedProfilesConfig
+	MaxResponseChars  int
 }
 
 var (
@@ -221,7 +227,14 @@ func normalizeConfig(input ConfigInput, baseDir string, lookup LookupEnv, keycha
 	}
 
 	spec := input.Spec
-	if !isHTTPURL(spec) {
+	if isHTTPURL(spec) {
+		if !input.AllowRemoteSpec {
+			return Config{}, errors.New("remote OpenAPI documents are disabled by default; set `allowRemoteSpec` to true to opt in")
+		}
+		if !strings.HasPrefix(strings.ToLower(spec), "https://") {
+			return Config{}, errors.New("remote OpenAPI documents must use HTTPS")
+		}
+	} else {
 		spec = filepath.Join(baseDir, spec)
 	}
 
@@ -249,6 +262,9 @@ func normalizeConfig(input ConfigInput, baseDir string, lookup LookupEnv, keycha
 	if err != nil {
 		return Config{}, err
 	}
+	if auth.Type != "none" && input.ServerURL == "" && (isHTTPURL(input.Spec) || input.AllowExternalRefs) {
+		return Config{}, errors.New("authenticated configurations with a remote OpenAPI document or external references must set `serverUrl` explicitly")
+	}
 	tools, err := normalizeToolFilter(input.Tools)
 	if err != nil {
 		return Config{}, err
@@ -266,16 +282,18 @@ func normalizeConfig(input ConfigInput, baseDir string, lookup LookupEnv, keycha
 	}
 
 	return Config{
-		Name:             name,
-		Version:          version,
-		Spec:             spec,
-		ServerURL:        input.ServerURL,
-		Auth:             auth,
-		Headers:          headers,
-		Tools:            tools,
-		ToolPolicy:       toolPolicy,
-		Profiles:         profiles,
-		MaxResponseChars: maxResponseChars,
+		Name:              name,
+		Version:           version,
+		Spec:              spec,
+		AllowRemoteSpec:   input.AllowRemoteSpec,
+		AllowExternalRefs: input.AllowExternalRefs,
+		ServerURL:         input.ServerURL,
+		Auth:              auth,
+		Headers:           headers,
+		Tools:             tools,
+		ToolPolicy:        toolPolicy,
+		Profiles:          profiles,
+		MaxResponseChars:  maxResponseChars,
 	}, nil
 }
 
@@ -364,11 +382,11 @@ func resolveAuth(auth *AuthConfig, lookup LookupEnv, keychainStore KeychainStore
 		if auth.Keychain != nil {
 			return ResolvedAuthConfig{}, errors.New("keychain is not supported for auth type `headers`; use environment placeholders")
 		}
-		headers, err := resolveHeaderValues(auth.Headers, lookup)
+		headers, redactionValues, err := resolveHeaderValuesWithSecrets(auth.Headers, lookup)
 		if err != nil {
 			return ResolvedAuthConfig{}, err
 		}
-		return ResolvedAuthConfig{Type: "headers", Headers: headers}, nil
+		return ResolvedAuthConfig{Type: "headers", Headers: headers, RedactionValues: redactionValues}, nil
 	default:
 		return ResolvedAuthConfig{}, fmt.Errorf("unsupported auth type: %s", auth.Type)
 	}
@@ -413,21 +431,38 @@ func requiredSecret(label, inlineValue, envName string, keychainRef *KeychainCon
 }
 
 func resolveHeaderValues(headers map[string]string, lookup LookupEnv) (map[string]string, error) {
+	resolved, _, err := resolveHeaderValuesWithSecrets(headers, lookup)
+	return resolved, err
+}
+
+func resolveHeaderValuesWithSecrets(headers map[string]string, lookup LookupEnv) (map[string]string, []string, error) {
 	resolved := map[string]string{}
+	var secrets []string
 	for name, value := range headers {
-		next, err := resolveEnvPlaceholders(value, lookup)
+		next, values, err := resolveEnvPlaceholdersWithSecrets(value, lookup)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		resolved[name] = next
+		for _, secret := range values {
+			if !slices.Contains(secrets, secret) {
+				secrets = append(secrets, secret)
+			}
+		}
 	}
-	return resolved, nil
+	return resolved, secrets, nil
 }
 
 var envPlaceholderPattern = regexp.MustCompile(`\$\{([A-Za-z0-9_]+)\}`)
 
 func resolveEnvPlaceholders(value string, lookup LookupEnv) (string, error) {
+	result, _, err := resolveEnvPlaceholdersWithSecrets(value, lookup)
+	return result, err
+}
+
+func resolveEnvPlaceholdersWithSecrets(value string, lookup LookupEnv) (string, []string, error) {
 	var resultErr error
+	var secrets []string
 	result := envPlaceholderPattern.ReplaceAllStringFunc(value, func(match string) string {
 		if resultErr != nil {
 			return ""
@@ -438,12 +473,15 @@ func resolveEnvPlaceholders(value string, lookup LookupEnv) (string, error) {
 			resultErr = fmt.Errorf("environment variable %s is required", name)
 			return ""
 		}
+		if !slices.Contains(secrets, envValue) {
+			secrets = append(secrets, envValue)
+		}
 		return envValue
 	})
 	if resultErr != nil {
-		return "", resultErr
+		return "", nil, resultErr
 	}
-	return result, nil
+	return result, secrets, nil
 }
 
 func normalizeToolFilter(filter ToolFilterConfig) (ToolFilterConfig, error) {

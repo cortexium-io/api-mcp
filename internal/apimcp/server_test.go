@@ -155,6 +155,102 @@ func TestCredentialSetupToolStoresWithoutReturningCredential(t *testing.T) {
 	}
 }
 
+func TestMutatingOperationRequiresLocalConfirmationBeforeCredentialsOrHTTP(t *testing.T) {
+	var requestCount int
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requestCount++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer apiServer.Close()
+
+	ref := KeychainConfig{Service: "api-mcp.test", Account: "default", PromptOnMissing: true}
+	store := &fakeKeychainStore{values: map[string][]byte{}}
+	prompter := &fakeCredentialPrompter{value: []byte("secret")}
+	confirmer := &fakeActionConfirmer{err: ErrActionConfirmationCanceled}
+	cfg := Config{
+		Name:      "confirmation-test",
+		Version:   "0.1.0",
+		Spec:      filepath.Join("..", "..", "testdata", "openapi.yaml"),
+		ServerURL: apiServer.URL,
+		Auth: ResolvedAuthConfig{
+			Type:              "apiKey",
+			In:                "headers",
+			Name:              "X-API-Key",
+			Keychain:          &ref,
+			CredentialMissing: true,
+		},
+		Tools:            ToolFilterConfig{Include: []string{"create_widget"}},
+		MaxResponseChars: 20_000,
+	}
+
+	result := callToolWithArgsForTest(t, cfg, store, prompter, confirmer, "create_widget", map[string]any{
+		"body": map[string]any{"name": "Blocked"},
+	})
+	if !result.IsError {
+		t.Fatal("canceled confirmation should reject the write")
+	}
+	if requestCount != 0 || store.getCalls != 0 || store.setCalls != 0 || prompter.calls != 0 {
+		t.Fatalf("canceled write crossed a protected boundary: requests=%d keychainGets=%d keychainSets=%d prompts=%d", requestCount, store.getCalls, store.setCalls, prompter.calls)
+	}
+	if got, want := len(confirmer.confirmations), 1; got != want {
+		t.Fatalf("confirmations = %d, want %d", got, want)
+	}
+	confirmation := confirmer.confirmations[0]
+	if confirmation.Action != "POST create_widget" || confirmation.Destination != apiServer.URL+"/widgets" {
+		t.Fatalf("unexpected confirmation: %+v", confirmation)
+	}
+}
+
+func TestReadOperationDoesNotRequireLocalConfirmation(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer apiServer.Close()
+	cfg := Config{
+		Name:             "confirmation-test",
+		Version:          "0.1.0",
+		Spec:             filepath.Join("..", "..", "testdata", "openapi.yaml"),
+		ServerURL:        apiServer.URL,
+		Auth:             ResolvedAuthConfig{Type: "none"},
+		Tools:            ToolFilterConfig{Include: []string{"get_current_account"}},
+		MaxResponseChars: 20_000,
+	}
+	confirmer := &fakeActionConfirmer{err: ErrActionConfirmationCanceled}
+	result := callToolWithArgsForTest(t, cfg, &fakeKeychainStore{values: map[string][]byte{}}, &fakeCredentialPrompter{}, confirmer, "get_current_account", nil)
+	if result.IsError {
+		t.Fatalf("read operation was blocked by the write confirmer: %+v", result.Content)
+	}
+	if len(confirmer.confirmations) != 0 {
+		t.Fatalf("read operation requested confirmation: %+v", confirmer.confirmations)
+	}
+}
+
+func TestGeneratedToolRejectsUndeclaredInputBeforeHTTP(t *testing.T) {
+	var requestCount int
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requestCount++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer apiServer.Close()
+	cfg := Config{
+		Name:             "validation-test",
+		Version:          "0.1.0",
+		Spec:             filepath.Join("..", "..", "testdata", "openapi.yaml"),
+		ServerURL:        apiServer.URL,
+		Auth:             ResolvedAuthConfig{Type: "none"},
+		Tools:            ToolFilterConfig{Include: []string{"get_current_account"}},
+		MaxResponseChars: 20_000,
+	}
+	result := callToolWithArgsForTest(t, cfg, &fakeKeychainStore{values: map[string][]byte{}}, &fakeCredentialPrompter{}, &fakeActionConfirmer{}, "get_current_account", map[string]any{
+		"query": map[string]any{"undeclared": "value"},
+	})
+	if !result.IsError || requestCount != 0 {
+		t.Fatalf("undeclared input was forwarded: error=%v requests=%d", result.IsError, requestCount)
+	}
+}
+
 func TestConfigureToolsRefreshesTheLiveMCPToolList(t *testing.T) {
 	directory := t.TempDir()
 	catalogPath := filepath.Join(directory, "features.json")
@@ -185,7 +281,7 @@ func TestConfigureToolsRefreshesTheLiveMCPToolList(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	server, err := createServer(ctx, cfg, &fakeKeychainStore{values: map[string][]byte{}}, &fakeCredentialPrompter{})
+	server, err := createServer(ctx, cfg, &fakeKeychainStore{values: map[string][]byte{}}, &fakeCredentialPrompter{}, &fakeActionConfirmer{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +426,7 @@ func TestProfileAwareServerIsolatesCredentialsAndPolicies(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	server, err := createServer(ctx, cfg, store, prompter)
+	server, err := createServer(ctx, cfg, store, prompter, &fakeActionConfirmer{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -522,7 +618,7 @@ func listToolsForTestWithRuntime(t *testing.T, cfg Config, store KeychainStore, 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	server, err := createServer(ctx, cfg, store, prompter)
+	server, err := createServer(ctx, cfg, store, prompter, &fakeActionConfirmer{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -559,11 +655,18 @@ func listToolsForTestWithRuntime(t *testing.T, cfg Config, store KeychainStore, 
 }
 
 func callToolForTest(t *testing.T, cfg Config, store KeychainStore, prompter CredentialPrompter, name string) *mcp.CallToolResult {
+	return callToolWithArgsForTest(t, cfg, store, prompter, &fakeActionConfirmer{}, name, nil)
+}
+
+func callToolWithArgsForTest(t *testing.T, cfg Config, store KeychainStore, prompter CredentialPrompter, confirmer ActionConfirmer, name string, arguments map[string]any) *mcp.CallToolResult {
 	t.Helper()
+	if arguments == nil {
+		arguments = map[string]any{}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	server, err := createServer(ctx, cfg, store, prompter)
+	server, err := createServer(ctx, cfg, store, prompter, confirmer)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -578,7 +681,7 @@ func callToolForTest(t *testing.T, cfg Config, store KeychainStore, prompter Cre
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: map[string]any{}})
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: arguments})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -638,4 +741,14 @@ func stringSlice(value any) []string {
 		}
 	}
 	return result
+}
+
+type fakeActionConfirmer struct {
+	err           error
+	confirmations []ActionConfirmation
+}
+
+func (f *fakeActionConfirmer) Confirm(_ context.Context, confirmation ActionConfirmation) error {
+	f.confirmations = append(f.confirmations, confirmation)
+	return f.err
 }

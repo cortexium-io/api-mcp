@@ -3,7 +3,9 @@ package apimcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -22,10 +24,13 @@ const (
 )
 
 func CreateServer(ctx context.Context, cfg Config) (*mcp.Server, error) {
-	return createServer(ctx, cfg, platformKeychainStore(), platformCredentialPrompter())
+	return createServer(ctx, cfg, platformKeychainStore(), platformCredentialPrompter(), platformActionConfirmer())
 }
 
-func createServer(ctx context.Context, cfg Config, store KeychainStore, prompter CredentialPrompter) (*mcp.Server, error) {
+func createServer(ctx context.Context, cfg Config, store KeychainStore, prompter CredentialPrompter, confirmer ActionConfirmer) (*mcp.Server, error) {
+	if confirmer == nil {
+		return nil, fmt.Errorf("action confirmer is required")
+	}
 	operationConfig := cfg
 	if cfg.ToolPolicy != nil {
 		operationConfig.Tools = ToolFilterConfig{}
@@ -63,9 +68,10 @@ func createServer(ctx context.Context, cfg Config, store KeychainStore, prompter
 		credentials: credentials,
 		profiles:    profiles,
 		operations:  operations,
+		confirmer:   confirmer,
 	}
 	if profiles != nil {
-		addProfileTools(server, profiles, registry)
+		addProfileTools(server, profiles, registry, confirmer)
 		registry.applyProfiles()
 		return server, nil
 	}
@@ -76,7 +82,7 @@ func createServer(ctx context.Context, cfg Config, store KeychainStore, prompter
 			return nil, err
 		}
 		filter = policy.filter()
-		addToolPolicyTools(server, policy, registry)
+		addToolPolicyTools(server, policy, registry, confirmer)
 	}
 	registry.apply(filter)
 
@@ -89,6 +95,7 @@ type operationToolRegistry struct {
 	credentials *credentialManager
 	profiles    *profileManager
 	operations  []OperationDescriptor
+	confirmer   ActionConfirmer
 }
 
 func (r *operationToolRegistry) applyProfiles() {
@@ -126,10 +133,18 @@ func (r *operationToolRegistry) add(operation OperationDescriptor) {
 		Annotations: operationToolAnnotations(operation),
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var input ToolInput
+		if err := decodeStrictToolInput(req, &input); err != nil {
+			return toolError("invalid tool arguments: " + err.Error()), nil
+		}
+		arguments := map[string]any{}
 		if req != nil && req.Params != nil && len(req.Params.Arguments) > 0 {
-			if err := json.Unmarshal(req.Params.Arguments, &input); err != nil {
+			if err := json.Unmarshal(req.Params.Arguments, &arguments); err != nil {
 				return toolError("invalid tool arguments: " + err.Error()), nil
 			}
+		}
+		_, bodyPresent := arguments["body"]
+		if err := validateToolInput(operation, input, bodyPresent); err != nil {
+			return toolError("invalid tool arguments: " + err.Error()), nil
 		}
 
 		var auth ResolvedAuthConfig
@@ -142,13 +157,23 @@ func (r *operationToolRegistry) add(operation OperationDescriptor) {
 			if !ShouldExposeOperation(operation, runtime.policy.filter()) {
 				return toolError(fmt.Sprintf("tool %q is disabled for profile %q; use search_available_tools or configure_tools for that profile", operation.ToolName, runtime.profile.ID)), nil
 			}
+			profile := runtime.profile
+			selectedProfile = &profile
+			if !isReadOnlyMethod(operation.Method) {
+				if err := r.confirmer.Confirm(ctx, operationConfirmation(r.config, operation, selectedProfile, arguments)); err != nil {
+					return toolError(actionConfirmationError(err)), nil
+				}
+			}
 			auth, err = runtime.credentials.authForRequest(ctx)
 			if err != nil {
 				return toolError(err.Error()), nil
 			}
-			profile := runtime.profile
-			selectedProfile = &profile
 		} else {
+			if !isReadOnlyMethod(operation.Method) {
+				if err := r.confirmer.Confirm(ctx, operationConfirmation(r.config, operation, nil, arguments)); err != nil {
+					return toolError(actionConfirmationError(err)), nil
+				}
+			}
 			var err error
 			auth, err = r.credentials.authForRequest(ctx)
 			if err != nil {
@@ -166,6 +191,24 @@ func (r *operationToolRegistry) add(operation OperationDescriptor) {
 		}
 		return toolResponse(response), nil
 	})
+}
+
+func operationConfirmation(cfg Config, operation OperationDescriptor, profile *APIProfile, arguments map[string]any) ActionConfirmation {
+	destination := strings.TrimRight(operation.ServerURL, "/") + "/" + strings.TrimLeft(operation.Path, "/")
+	return ActionConfirmation{
+		ApplicationName: cfg.Name,
+		Profile:         profile,
+		Action:          strings.ToUpper(operation.Method) + " " + operation.ToolName,
+		Destination:     destination,
+		Details:         arguments,
+	}
+}
+
+func actionConfirmationError(err error) string {
+	if errors.Is(err, ErrActionConfirmationCanceled) {
+		return "action confirmation was canceled; no change was made"
+	}
+	return err.Error()
 }
 
 func operationToolAnnotations(operation OperationDescriptor) *mcp.ToolAnnotations {

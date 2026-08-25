@@ -47,12 +47,55 @@ func TestNormalizeConfigUsesBuildVersionByDefault(t *testing.T) {
 	DefaultVersion = "v9.8.7"
 	t.Cleanup(func() { DefaultVersion = previous })
 
-	cfg, err := NormalizeConfig(ConfigInput{Spec: "https://api.example.com/openapi.json"}, "/tmp/config", mapLookup(map[string]string{}))
+	cfg, err := NormalizeConfig(ConfigInput{Spec: "openapi.json"}, "/tmp/config", mapLookup(map[string]string{}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, want := cfg.Version, "v9.8.7"; got != want {
 		t.Fatalf("version = %q, want %q", got, want)
+	}
+}
+
+func TestNormalizeConfigRequiresExplicitRemoteSpecTrustAndPinnedAuthenticatedDestination(t *testing.T) {
+	base := ConfigInput{Spec: "https://docs.example.com/openapi.json"}
+	if _, err := NormalizeConfig(base, "/tmp/config", mapLookup(map[string]string{})); err == nil || !strings.Contains(err.Error(), "allowRemoteSpec") {
+		t.Fatalf("remote spec without opt-in error = %v", err)
+	}
+	base.AllowRemoteSpec = true
+	base.Auth = &AuthConfig{Type: "bearer", Token: "secret"}
+	if _, err := NormalizeConfig(base, "/tmp/config", mapLookup(map[string]string{})); err == nil || !strings.Contains(err.Error(), "serverUrl") {
+		t.Fatalf("authenticated remote spec without pinned server error = %v", err)
+	}
+	base.ServerURL = "https://api.example.com"
+	cfg, err := NormalizeConfig(base, "/tmp/config", mapLookup(map[string]string{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.AllowRemoteSpec || cfg.ServerURL != base.ServerURL {
+		t.Fatalf("unexpected remote config: %+v", cfg)
+	}
+}
+
+func TestNormalizeConfigRejectsInsecureRemoteSpec(t *testing.T) {
+	_, err := NormalizeConfig(ConfigInput{Spec: "http://docs.example.com/openapi.json", AllowRemoteSpec: true}, "/tmp/config", mapLookup(map[string]string{}))
+	if err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("insecure remote spec error = %v", err)
+	}
+}
+
+func TestResolveCompositeAuthHeadersTracksPlaceholderSecretsForRedaction(t *testing.T) {
+	auth, err := resolveAuth(&AuthConfig{
+		Type:    "headers",
+		Headers: map[string]string{"X-Custom-Auth": "Token ${API_TOKEN}; tenant=public"},
+	}, mapLookup(map[string]string{"API_TOKEN": "top-secret-token"}), &fakeKeychainStore{values: map[string][]byte{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := auth.Headers["X-Custom-Auth"], "Token top-secret-token; tenant=public"; got != want {
+		t.Fatalf("resolved header = %q, want %q", got, want)
+	}
+	if !reflect.DeepEqual(auth.RedactionValues, []string{"top-secret-token"}) {
+		t.Fatalf("redaction values = %#v", auth.RedactionValues)
 	}
 }
 
@@ -130,7 +173,7 @@ func TestNormalizeConfigResolvesProfileRegistryBesideToolPolicy(t *testing.T) {
 
 func TestNormalizeConfigRejectsProfilesWithoutManagedPolicyAndPromptedKeychain(t *testing.T) {
 	base := ConfigInput{
-		Spec:     "https://api.example.com/openapi.json",
+		Spec:     "openapi.json",
 		Profiles: &ProfilesConfig{},
 	}
 	if _, err := NormalizeConfig(base, "/tmp/config", mapLookup(map[string]string{})); err == nil {
@@ -160,25 +203,25 @@ func TestNormalizeConfigRejectsProfilesWithoutManagedPolicyAndPromptedKeychain(t
 func TestNormalizeConfigRejectsInvalidToolPolicyPathsAndDefaultPolicy(t *testing.T) {
 	for name, input := range map[string]ConfigInput{
 		"invalid default policy": {
-			Spec:  "https://api.example.com/openapi.json",
+			Spec:  "openapi.json",
 			Tools: ToolFilterConfig{DefaultPolicy: "maybe"},
 		},
 		"nested user directory": {
-			Spec: "https://api.example.com/openapi.json",
+			Spec: "openapi.json",
 			ToolPolicy: &ToolPolicyConfig{
 				UserConfigDirectory: "Example/Plugin",
 				Catalog:             "features.json",
 			},
 		},
 		"remote catalog": {
-			Spec: "https://api.example.com/openapi.json",
+			Spec: "openapi.json",
 			ToolPolicy: &ToolPolicyConfig{
 				UserConfigDirectory: "Example Plugin",
 				Catalog:             "https://example.com/features.json",
 			},
 		},
 		"fixed and managed tool filters": {
-			Spec:  "https://api.example.com/openapi.json",
+			Spec:  "openapi.json",
 			Tools: ToolFilterConfig{Include: []string{"GET *"}},
 			ToolPolicy: &ToolPolicyConfig{
 				UserConfigDirectory: "Example Plugin",
@@ -196,7 +239,7 @@ func TestNormalizeConfigRejectsInvalidToolPolicyPathsAndDefaultPolicy(t *testing
 
 func TestNormalizeConfigRejectsMissingEnvBackedCredentials(t *testing.T) {
 	_, err := NormalizeConfig(ConfigInput{
-		Spec: "https://api.example.com/openapi.json",
+		Spec: "openapi.json",
 		Auth: &AuthConfig{
 			Type:     "bearer",
 			TokenEnv: "API_TOKEN",
@@ -212,7 +255,7 @@ func TestNormalizeConfigFallsBackToKeychainWhenEnvironmentIsUnset(t *testing.T) 
 		keychainTestKey(KeychainConfig{Service: "api-mcp.example", Account: "default"}): []byte("keychain-secret"),
 	}}
 	cfg, err := normalizeConfig(ConfigInput{
-		Spec: "https://api.example.com/openapi.json",
+		Spec: "openapi.json",
 		Auth: &AuthConfig{
 			Type:     "apiKey",
 			In:       "headers",
@@ -237,7 +280,7 @@ func TestNormalizeConfigPrefersEnvironmentOverKeychain(t *testing.T) {
 		keychainTestKey(KeychainConfig{Service: "api-mcp.example", Account: "default"}): []byte("keychain-secret"),
 	}}
 	cfg, err := normalizeConfig(ConfigInput{
-		Spec: "https://api.example.com/openapi.json",
+		Spec: "openapi.json",
 		Auth: &AuthConfig{
 			Type:     "apiKey",
 			In:       "headers",
@@ -260,7 +303,7 @@ func TestNormalizeConfigPrefersEnvironmentOverKeychain(t *testing.T) {
 func TestNormalizeConfigReportsMissingKeychainItemWithoutSecretMaterial(t *testing.T) {
 	store := &fakeKeychainStore{values: map[string][]byte{}}
 	_, err := normalizeConfig(ConfigInput{
-		Spec: "https://api.example.com/openapi.json",
+		Spec: "openapi.json",
 		Auth: &AuthConfig{
 			Type:     "bearer",
 			Keychain: &KeychainConfig{Service: "api-mcp.test", Account: "missing"},
@@ -277,7 +320,7 @@ func TestNormalizeConfigReportsMissingKeychainItemWithoutSecretMaterial(t *testi
 func TestNormalizeConfigDefersMissingKeychainCredentialWhenPromptIsEnabled(t *testing.T) {
 	store := &fakeKeychainStore{values: map[string][]byte{}}
 	cfg, err := normalizeConfig(ConfigInput{
-		Spec: "https://api.example.com/openapi.json",
+		Spec: "openapi.json",
 		Auth: &AuthConfig{
 			Type: "apiKey",
 			In:   "headers",
@@ -361,7 +404,7 @@ func TestLoadConfigFromArgsUsesEmbeddedConfigWhenNoConfigIsProvided(t *testing.T
 
 	input := ConfigInput{
 		Name: "embedded",
-		Spec: "https://api.example.com/openapi.json",
+		Spec: "openapi.json",
 		Auth: &AuthConfig{
 			Type:     "apiKey",
 			In:       "headers",
@@ -396,7 +439,7 @@ func TestEmbeddedConfigCanIncludeInlineCredentials(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(configPath, []byte(`{
-		"spec": "https://api.example.com/openapi.json",
+		"spec": "openapi.json",
 		"auth": {
 			"type": "apiKey",
 			"in": "headers",
