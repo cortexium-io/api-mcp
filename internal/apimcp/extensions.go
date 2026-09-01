@@ -23,11 +23,15 @@ type ExtensionBatchItem struct {
 }
 
 type ExtensionBatchRequest struct {
-	Profile            string                      `json:"profile,omitempty"`
-	Action             string                      `json:"action"`
-	Details            any                         `json:"details,omitempty"`
-	Items              []ExtensionBatchItem        `json:"items"`
-	StopOnError        bool                        `json:"stopOnError"`
+	Profile     string               `json:"profile,omitempty"`
+	Action      string               `json:"action"`
+	Details     any                  `json:"details,omitempty"`
+	Items       []ExtensionBatchItem `json:"items"`
+	StopOnError bool                 `json:"stopOnError"`
+	// AfterApprovalCheck revalidates workflow-owned preconditions after the
+	// native approval dialog and immediately before credential resolution.
+	// It must be read-only. This narrows, but cannot make atomic, the interval
+	// between an upstream state check and the first write.
 	AfterApprovalCheck func(context.Context) error `json:"-"`
 }
 

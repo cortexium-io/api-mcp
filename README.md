@@ -333,7 +333,7 @@ When a JSON response contains supported paging metadata such as `meta.paging`, a
 
 ## Custom Workflow Host
 
-The public `github.com/cortexium-io/api-mcp/apimcp` package lets a thin API-specific binary register custom MCP tools without owning credentials, profile state, policy enforcement, or HTTP transport. Extensions can execute enabled read operations or submit one exact write batch. A batch is fully validated first, receives one native approval showing every item, and only then resolves credentials and performs those exact calls.
+The public `github.com/cortexium-io/api-mcp/apimcp` package lets a thin API-specific binary register custom MCP tools without owning credentials, profile state, policy enforcement, or HTTP transport. Extensions can execute enabled read operations or submit one exact write batch. A batch is fully validated first, receives one native approval showing every item, and only then resolves credentials and performs those exact calls. Workflows with state-dependent writes can set `AfterApprovalCheck` to re-read their preconditions after the dialog and before credential resolution; the callback must be read-only and does not replace an upstream conditional-write primitive when one exists.
 
 There is intentionally no public unconfirmed-write method. API-specific review and preview/commit logic belongs in the API plugin, while api-mcp retains the shared security boundary.
 
