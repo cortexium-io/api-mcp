@@ -2,6 +2,7 @@ package apimcp
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -233,6 +234,42 @@ func TestExtensionBatchRechecksPolicyAfterApprovalBeforeCredentialRead(t *testin
 	}
 	if len(confirmer.confirmations) != 1 || store.getCalls != 0 || prompter.calls != 0 {
 		t.Fatalf("protected boundary crossed: confirmations=%d keychainGets=%d prompts=%d", len(confirmer.confirmations), store.getCalls, prompter.calls)
+	}
+}
+
+func TestExtensionBatchRunsPostApprovalCheckBeforeCredentialRead(t *testing.T) {
+	store := &fakeKeychainStore{values: map[string][]byte{}}
+	prompter := &fakeCredentialPrompter{value: []byte("secret")}
+	confirmer := &fakeActionConfirmer{}
+	runtime := extensionRuntimeForTest(t, "https://api.example.test", store, prompter, confirmer)
+	auth := ResolvedAuthConfig{
+		Type:              "apiKey",
+		In:                "headers",
+		Name:              "X-API-Key",
+		Keychain:          &KeychainConfig{Service: "api-mcp.test", Account: "default", PromptOnMissing: true},
+		CredentialMissing: true,
+	}
+	runtime.config.Auth = auth
+	runtime.credentials = newCredentialManager(runtime.config.Name, auth, store, prompter)
+	checkCalls := 0
+
+	_, err := runtime.ExecuteBatch(context.Background(), ExtensionBatchRequest{
+		Action: "Delete a record",
+		Items: []ExtensionBatchItem{{
+			ID:        "one",
+			Operation: "delete_widget",
+			Input:     ToolInput{Path: map[string]any{"id": "one"}},
+		}},
+		AfterApprovalCheck: func(context.Context) error {
+			checkCalls++
+			return errors.New("record became associated")
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "post-approval precondition failed") {
+		t.Fatalf("post-approval check error = %v", err)
+	}
+	if checkCalls != 1 || len(confirmer.confirmations) != 1 || store.getCalls != 0 || prompter.calls != 0 {
+		t.Fatalf("ordering = checks:%d confirmations:%d keychainGets:%d prompts:%d", checkCalls, len(confirmer.confirmations), store.getCalls, prompter.calls)
 	}
 }
 

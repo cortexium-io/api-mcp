@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -75,6 +76,18 @@ func TestDiagnosticsReportsRuntimeWithoutCredentialMaterial(t *testing.T) {
 func TestDiagnosticsToolNameIsReserved(t *testing.T) {
 	if !isReservedToolName(diagnosticsToolName) {
 		t.Fatalf("%s must be reserved", diagnosticsToolName)
+	}
+}
+
+func TestDiagnosticSpecLocationRedactsRemoteCredentialsAndSignedParameters(t *testing.T) {
+	location, file := diagnosticSpecLocation("https://user:password@docs.example.test/private/token-123/openapi.json?signature=top-secret#fragment")
+	if location != "https://docs.example.test/[remote-spec]" || file != "openapi.json" {
+		t.Fatalf("diagnostic spec = %q / %q", location, file)
+	}
+	for _, secret := range []string{"user", "password", "private", "token-123", "top-secret", "fragment"} {
+		if strings.Contains(location, secret) || strings.Contains(file, secret) {
+			t.Fatalf("diagnostic spec leaked %q: %q / %q", secret, location, file)
+		}
 	}
 }
 

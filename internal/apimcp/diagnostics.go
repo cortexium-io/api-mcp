@@ -3,6 +3,8 @@ package apimcp
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -34,14 +36,15 @@ func addDiagnosticsTool(server *mcp.Server, cfg Config, operations []OperationDe
 			return toolError("invalid tool arguments: " + err.Error()), nil
 		}
 
+		diagnosticSpec, diagnosticSpecFile := diagnosticSpecLocation(cfg.Spec)
 		result := map[string]any{
 			"implementation": map[string]any{
 				"name":    cfg.Name,
 				"version": cfg.Version,
 			},
 			"openapi": map[string]any{
-				"spec":           cfg.Spec,
-				"specFile":       filepath.Base(cfg.Spec),
+				"spec":           diagnosticSpec,
+				"specFile":       diagnosticSpecFile,
 				"operationCount": len(operations),
 			},
 			"responseLimits": map[string]any{
@@ -87,6 +90,18 @@ func addDiagnosticsTool(server *mcp.Server, cfg Config, operations []OperationDe
 
 		return jsonToolResponse("API MCP runtime diagnostics. No credential material was read into the conversation.", result), nil
 	})
+}
+
+func diagnosticSpecLocation(spec string) (string, string) {
+	parsed, err := url.Parse(spec)
+	if err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != "" {
+		file := path.Base(parsed.Path)
+		if file == "." || file == "/" || file == "" {
+			file = "remote OpenAPI document"
+		}
+		return parsed.Scheme + "://" + parsed.Host + "/[remote-spec]", file
+	}
+	return spec, filepath.Base(spec)
 }
 
 func diagnosticsForProfiles(profiles *profileManager, selected string) ([]diagnosticsProfile, error) {

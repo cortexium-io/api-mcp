@@ -23,11 +23,12 @@ type ExtensionBatchItem struct {
 }
 
 type ExtensionBatchRequest struct {
-	Profile     string               `json:"profile,omitempty"`
-	Action      string               `json:"action"`
-	Details     any                  `json:"details,omitempty"`
-	Items       []ExtensionBatchItem `json:"items"`
-	StopOnError bool                 `json:"stopOnError"`
+	Profile            string                      `json:"profile,omitempty"`
+	Action             string                      `json:"action"`
+	Details            any                         `json:"details,omitempty"`
+	Items              []ExtensionBatchItem        `json:"items"`
+	StopOnError        bool                        `json:"stopOnError"`
+	AfterApprovalCheck func(context.Context) error `json:"-"`
 }
 
 type ExtensionBatchResult struct {
@@ -177,6 +178,11 @@ func (r *ExtensionRuntime) ExecuteBatch(ctx context.Context, request ExtensionBa
 			return nil, fmt.Errorf("batch item %q changed to a read-only operation after approval", item.ID)
 		}
 		operations[i] = operation
+	}
+	if request.AfterApprovalCheck != nil {
+		if err := request.AfterApprovalCheck(ctx); err != nil {
+			return nil, fmt.Errorf("extension batch post-approval precondition failed: %w", err)
+		}
 	}
 
 	auth, selectedProfile, err := r.authForRequest(ctx, request.Profile)
