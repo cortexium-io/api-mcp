@@ -33,6 +33,26 @@ type APIResponse struct {
 	Headers    map[string]string `json:"headers"`
 	Body       any               `json:"body"`
 	Truncated  bool              `json:"truncated"`
+	Truncation *TruncationInfo   `json:"truncation,omitempty"`
+	Pagination *PaginationInfo   `json:"pagination,omitempty"`
+}
+
+type TruncationInfo struct {
+	Code                 string `json:"code"`
+	LimitBytes           int    `json:"limitBytes"`
+	ReceivedBytesAtLeast int    `json:"receivedBytesAtLeast"`
+	PartialBodyDiscarded bool   `json:"partialBodyDiscarded"`
+	RetryAdvice          string `json:"retryAdvice"`
+}
+
+type PaginationInfo struct {
+	Source    string `json:"source"`
+	Page      int    `json:"page"`
+	PageCount int    `json:"pageCount"`
+	PageSize  int    `json:"pageSize,omitempty"`
+	Total     int    `json:"total,omitempty"`
+	NextURL   string `json:"nextUrl,omitempty"`
+	FinalPage bool   `json:"finalPage"`
 }
 
 type HTTPDoer interface {
@@ -61,21 +81,101 @@ func ExecuteOperation(ctx context.Context, operation OperationDescriptor, input 
 	if err != nil {
 		return APIResponse{}, errors.New(redactAuthText(err.Error(), cfg.Auth))
 	}
-	truncated := len(data) > maxChars
+	receivedBytes := len(data)
+	truncated := receivedBytes > maxChars
 	if truncated {
 		data = data[:maxChars]
 	}
 
+	httpOK := response.StatusCode >= 200 && response.StatusCode < 300
 	result := APIResponse{
-		OK:         response.StatusCode >= 200 && response.StatusCode < 300,
+		OK:         httpOK && !truncated,
 		Status:     response.StatusCode,
 		StatusText: response.Status,
 		Headers:    flattenHeaders(response.Header),
-		Body:       parseResponseBody(data, response.Header.Get("content-type")),
 		Truncated:  truncated,
+	}
+	if truncated {
+		result.Truncation = &TruncationInfo{
+			Code:                 "response_body_truncated",
+			LimitBytes:           maxChars,
+			ReceivedBytesAtLeast: receivedBytes,
+			PartialBodyDiscarded: true,
+			RetryAdvice:          "Retry with a smaller pageSize, the next explicit page, or narrower filters. Do not treat this response as a complete collection.",
+		}
+		result.Body = map[string]any{
+			"error":   "response_body_truncated",
+			"message": "The upstream response exceeded the configured MCP response limit. The partial body was discarded.",
+		}
+	} else {
+		result.Body = parseResponseBody(data, response.Header.Get("content-type"))
+		result.Pagination = extractPagination(result.Body)
 	}
 	redactAuthFromResponse(&result, cfg.Auth)
 	return result, nil
+}
+
+func extractPagination(body any) *PaginationInfo {
+	root, ok := body.(map[string]any)
+	if !ok {
+		return nil
+	}
+	candidates := []struct {
+		path  string
+		value any
+	}{
+		{path: "meta.paging", value: nestedMapValue(root, "meta", "paging")},
+		{path: "meta.pagination", value: nestedMapValue(root, "meta", "pagination")},
+		{path: "paging", value: root["paging"]},
+		{path: "pagination", value: root["pagination"]},
+	}
+	for _, candidate := range candidates {
+		paging, ok := candidate.value.(map[string]any)
+		if !ok {
+			continue
+		}
+		page, pageOK := integerValue(paging["page"])
+		pageCount, countOK := integerValue(paging["pageCount"])
+		if !pageOK || !countOK || page < 1 || pageCount < 1 {
+			continue
+		}
+		pageSize, _ := integerValue(paging["pageSize"])
+		total, _ := integerValue(paging["total"])
+		nextURL, _ := paging["nextUrl"].(string)
+		return &PaginationInfo{
+			Source:    candidate.path,
+			Page:      page,
+			PageCount: pageCount,
+			PageSize:  pageSize,
+			Total:     total,
+			NextURL:   nextURL,
+			FinalPage: page >= pageCount,
+		}
+	}
+	return nil
+}
+
+func nestedMapValue(root map[string]any, first, second string) any {
+	nested, ok := root[first].(map[string]any)
+	if !ok {
+		return nil
+	}
+	return nested[second]
+}
+
+func integerValue(value any) (int, bool) {
+	switch value := value.(type) {
+	case float64:
+		integer := int(value)
+		return integer, value == float64(integer)
+	case int:
+		return value, true
+	case json.Number:
+		integer, err := value.Int64()
+		return int(integer), err == nil
+	default:
+		return 0, false
+	}
 }
 
 func BuildHTTPRequest(ctx context.Context, operation OperationDescriptor, input ToolInput, cfg Config) (*http.Request, error) {
@@ -234,6 +334,9 @@ func redactAuthFromResponse(response *APIResponse, auth ResolvedAuthConfig) {
 	response.StatusText = redactText(response.StatusText, secrets)
 	for name, value := range response.Headers {
 		response.Headers[name] = redactText(value, secrets)
+	}
+	if response.Pagination != nil {
+		response.Pagination.NextURL = redactText(response.Pagination.NextURL, secrets)
 	}
 	response.Body = redactValue(response.Body, secrets)
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"reflect"
 	"strings"
@@ -154,6 +155,85 @@ func TestExecuteOperationParsesJSONResponse(t *testing.T) {
 	}
 }
 
+func TestExecuteOperationDiscardsTruncatedJSONAndReturnsStructuredRetry(t *testing.T) {
+	cfg := testHTTPConfig
+	cfg.MaxResponseChars = 32
+	client := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: 200,
+			Status:     "200 OK",
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       ioNopCloser(`{"records":[{"id":"one"},{"id":"two"},{"id":"three"}]}`),
+		}, nil
+	})
+
+	response, err := ExecuteOperation(context.Background(), testOperation, ToolInput{
+		Path: map[string]any{"petId": 123},
+	}, cfg, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.OK {
+		t.Fatal("truncated response must not be reported as complete success")
+	}
+	if !response.Truncated || response.Truncation == nil {
+		t.Fatalf("missing structured truncation metadata: %+v", response)
+	}
+	if !response.Truncation.PartialBodyDiscarded {
+		t.Fatalf("partial body should be discarded: %+v", response.Truncation)
+	}
+	if response.Truncation.Code != "response_body_truncated" {
+		t.Fatalf("truncation code = %q", response.Truncation.Code)
+	}
+	if response.Truncation.LimitBytes != cfg.MaxResponseChars || response.Truncation.ReceivedBytesAtLeast != cfg.MaxResponseChars+1 {
+		t.Fatalf("unexpected truncation byte counts: %+v", response.Truncation)
+	}
+	body, ok := response.Body.(map[string]any)
+	if !ok || body["error"] != "response_body_truncated" {
+		t.Fatalf("unexpected truncation body: %#v", response.Body)
+	}
+	if strings.Contains(response.Truncation.RetryAdvice, "three") || strings.Contains(response.Truncation.RetryAdvice, "records") {
+		t.Fatalf("retry advice leaked partial body: %q", response.Truncation.RetryAdvice)
+	}
+}
+
+func TestExecuteOperationExtractsProvenPaginationMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"meta":{"paging":{"page":2,"pageCount":2,"pageSize":50,"total":75,"nextUrl":""}},"records":[]}`))
+	}))
+	defer server.Close()
+
+	operation := OperationDescriptor{Method: "get", Path: "/records", ServerURL: server.URL}
+	response, err := ExecuteOperation(context.Background(), operation, ToolInput{}, Config{Auth: ResolvedAuthConfig{Type: "none"}, MaxResponseChars: 20_000}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Pagination == nil || response.Pagination.Source != "meta.paging" || !response.Pagination.FinalPage {
+		t.Fatalf("pagination = %+v", response.Pagination)
+	}
+	if response.Pagination.Page != 2 || response.Pagination.PageCount != 2 || response.Pagination.Total != 75 {
+		t.Fatalf("pagination = %+v", response.Pagination)
+	}
+}
+
+func TestExecuteOperationDoesNotInferPaginationWithoutPageCount(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"meta":{"paging":{"page":1}},"records":[]}`))
+	}))
+	defer server.Close()
+
+	operation := OperationDescriptor{Method: "get", Path: "/records", ServerURL: server.URL}
+	response, err := ExecuteOperation(context.Background(), operation, ToolInput{}, Config{Auth: ResolvedAuthConfig{Type: "none"}, MaxResponseChars: 20_000}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Pagination != nil {
+		t.Fatalf("pagination was inferred without complete metadata: %+v", response.Pagination)
+	}
+}
+
 func TestExecuteOperationRedactsAuthFromErrors(t *testing.T) {
 	cfg := testHTTPConfig
 	cfg.Auth = ResolvedAuthConfig{Type: "apiKey", In: "query", Name: "api_key", Value: "top-secret-token"}
@@ -205,6 +285,27 @@ func TestExecuteOperationRedactsAuthFromResponseHeadersAndBody(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "[REDACTED]") {
 		t.Fatalf("response should mark redactions: %s", data)
+	}
+}
+
+func TestExecuteOperationRedactsAuthFromPaginationURL(t *testing.T) {
+	cfg := testHTTPConfig
+	cfg.Auth = ResolvedAuthConfig{Type: "apiKey", In: "query", Name: "api_key", Value: "top-secret-token"}
+	client := roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: 200,
+			Status:     "200 OK",
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       ioNopCloser(`{"meta":{"paging":{"page":1,"pageCount":2,"nextUrl":"https://api.example.test/records?page=2&api_key=top-secret-token"}},"records":[]}`),
+		}, nil
+	})
+
+	response, err := ExecuteOperation(context.Background(), testOperation, ToolInput{Path: map[string]any{"petId": 123}}, cfg, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Pagination == nil || strings.Contains(response.Pagination.NextURL, "top-secret-token") || !strings.Contains(response.Pagination.NextURL, "[REDACTED]") {
+		t.Fatalf("pagination URL was not redacted: %+v", response.Pagination)
 	}
 }
 

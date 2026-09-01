@@ -21,13 +21,22 @@ const (
 	addProfileToolName        = "add_api_profile"
 	renameProfileToolName     = "rename_api_profile"
 	removeProfileToolName     = "remove_api_profile"
+	diagnosticsToolName       = "api_mcp_diagnostics"
 )
 
 func CreateServer(ctx context.Context, cfg Config) (*mcp.Server, error) {
-	return createServer(ctx, cfg, platformKeychainStore(), platformCredentialPrompter(), platformActionConfirmer())
+	return CreateServerWithExtensions(ctx, cfg, nil)
+}
+
+func CreateServerWithExtensions(ctx context.Context, cfg Config, extensions []ExtensionTool) (*mcp.Server, error) {
+	return createServerWithExtensions(ctx, cfg, platformKeychainStore(), platformCredentialPrompter(), platformActionConfirmer(), extensions)
 }
 
 func createServer(ctx context.Context, cfg Config, store KeychainStore, prompter CredentialPrompter, confirmer ActionConfirmer) (*mcp.Server, error) {
+	return createServerWithExtensions(ctx, cfg, store, prompter, confirmer, nil)
+}
+
+func createServerWithExtensions(ctx context.Context, cfg Config, store KeychainStore, prompter CredentialPrompter, confirmer ActionConfirmer, extensions []ExtensionTool) (*mcp.Server, error) {
 	if confirmer == nil {
 		return nil, fmt.Errorf("action confirmer is required")
 	}
@@ -44,6 +53,9 @@ func createServer(ctx context.Context, cfg Config, store KeychainStore, prompter
 			return nil, fmt.Errorf("OpenAPI operation conflicts with reserved tool name %q", operation.ToolName)
 		}
 	}
+	if err := validateExtensionTools(extensions, operations); err != nil {
+		return nil, err
+	}
 
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    cfg.Name,
@@ -51,6 +63,7 @@ func createServer(ctx context.Context, cfg Config, store KeychainStore, prompter
 	}, nil)
 	var credentials *credentialManager
 	var profiles *profileManager
+	var policy *toolPolicyManager
 	if cfg.Profiles != nil {
 		profiles, err = newProfileManager(cfg, operations, store, prompter)
 		if err != nil {
@@ -63,39 +76,56 @@ func createServer(ctx context.Context, cfg Config, store KeychainStore, prompter
 		}
 	}
 	registry := &operationToolRegistry{
-		server:      server,
-		config:      cfg,
-		credentials: credentials,
-		profiles:    profiles,
-		operations:  operations,
-		confirmer:   confirmer,
+		server:     server,
+		config:     cfg,
+		profiles:   profiles,
+		operations: operations,
 	}
 	if profiles != nil {
 		addProfileTools(server, profiles, registry, confirmer)
+		addDiagnosticsTool(server, cfg, operations, profiles, nil, nil)
+		runtime := &ExtensionRuntime{
+			config:     cfg,
+			profiles:   profiles,
+			operations: operationMap(operations),
+			confirmer:  confirmer,
+		}
+		registry.runtime = runtime
+		addExtensionTools(server, extensions, runtime)
 		registry.applyProfiles()
 		return server, nil
 	}
 	filter := cfg.Tools
 	if cfg.ToolPolicy != nil {
-		policy, err := newToolPolicyManager(*cfg.ToolPolicy, operations)
+		policy, err = newToolPolicyManager(*cfg.ToolPolicy, operations)
 		if err != nil {
 			return nil, err
 		}
 		filter = policy.filter()
 		addToolPolicyTools(server, policy, registry, confirmer)
 	}
+	addDiagnosticsTool(server, cfg, operations, nil, credentials, policy)
+	runtime := &ExtensionRuntime{
+		config:      cfg,
+		credentials: credentials,
+		policy:      policy,
+		filter:      filter,
+		operations:  operationMap(operations),
+		confirmer:   confirmer,
+	}
+	registry.runtime = runtime
+	addExtensionTools(server, extensions, runtime)
 	registry.apply(filter)
 
 	return server, nil
 }
 
 type operationToolRegistry struct {
-	server      *mcp.Server
-	config      Config
-	credentials *credentialManager
-	profiles    *profileManager
-	operations  []OperationDescriptor
-	confirmer   ActionConfirmer
+	server     *mcp.Server
+	config     Config
+	profiles   *profileManager
+	operations []OperationDescriptor
+	runtime    *ExtensionRuntime
 }
 
 func (r *operationToolRegistry) applyProfiles() {
@@ -147,47 +177,9 @@ func (r *operationToolRegistry) add(operation OperationDescriptor) {
 			return toolError("invalid tool arguments: " + err.Error()), nil
 		}
 
-		var auth ResolvedAuthConfig
-		var selectedProfile *APIProfile
-		if r.profiles != nil {
-			runtime, err := r.profiles.resolve(input.Profile)
-			if err != nil {
-				return toolError(err.Error()), nil
-			}
-			if !ShouldExposeOperation(operation, runtime.policy.filter()) {
-				return toolError(fmt.Sprintf("tool %q is disabled for profile %q; use search_available_tools or configure_tools for that profile", operation.ToolName, runtime.profile.ID)), nil
-			}
-			profile := runtime.profile
-			selectedProfile = &profile
-			if !isReadOnlyMethod(operation.Method) {
-				if err := r.confirmer.Confirm(ctx, operationConfirmation(r.config, operation, selectedProfile, arguments)); err != nil {
-					return toolError(actionConfirmationError(err)), nil
-				}
-			}
-			auth, err = runtime.credentials.authForRequest(ctx)
-			if err != nil {
-				return toolError(err.Error()), nil
-			}
-		} else {
-			if !isReadOnlyMethod(operation.Method) {
-				if err := r.confirmer.Confirm(ctx, operationConfirmation(r.config, operation, nil, arguments)); err != nil {
-					return toolError(actionConfirmationError(err)), nil
-				}
-			}
-			var err error
-			auth, err = r.credentials.authForRequest(ctx)
-			if err != nil {
-				return toolError(err.Error()), nil
-			}
-		}
-		requestConfig := r.config
-		requestConfig.Auth = auth
-		response, err := ExecuteOperation(ctx, operation, input, requestConfig, nil)
+		response, err := r.runtime.executeGenerated(ctx, input.Profile, operation.ToolName, input, arguments)
 		if err != nil {
 			return toolError(err.Error()), nil
-		}
-		if selectedProfile != nil {
-			response.Profile = selectedProfile
 		}
 		return toolResponse(response), nil
 	})
@@ -229,7 +221,7 @@ func operationToolAnnotations(operation OperationDescriptor) *mcp.ToolAnnotation
 func isReservedToolName(name string) bool {
 	switch name {
 	case credentialStatusToolName, credentialSetupToolName, toolConfigurationToolName, toolFeaturesToolName, toolSearchToolName, configureToolsToolName,
-		listProfilesToolName, addProfileToolName, renameProfileToolName, removeProfileToolName:
+		listProfilesToolName, addProfileToolName, renameProfileToolName, removeProfileToolName, diagnosticsToolName:
 		return true
 	default:
 		return false
@@ -296,7 +288,11 @@ func credentialToolResponse(stored bool, ref *KeychainConfig, message string) *m
 }
 
 func RunStdio(ctx context.Context, cfg Config) error {
-	server, err := CreateServer(ctx, cfg)
+	return RunStdioWithExtensions(ctx, cfg, nil)
+}
+
+func RunStdioWithExtensions(ctx context.Context, cfg Config, extensions []ExtensionTool) error {
+	server, err := CreateServerWithExtensions(ctx, cfg, extensions)
 	if err != nil {
 		return err
 	}

@@ -42,6 +42,42 @@ func TestCreateServerRegistersOpenAPIOperationsAsMCPTools(t *testing.T) {
 	}
 }
 
+func TestDiagnosticsReportsRuntimeWithoutCredentialMaterial(t *testing.T) {
+	cfg := baseTestConfig
+	cfg.Spec = filepath.Join("..", "..", "examples", "petstore-openapi.json")
+	cfg.Auth = ResolvedAuthConfig{
+		Type:              "apiKey",
+		In:                "headers",
+		Name:              "X-API-Key",
+		Keychain:          &KeychainConfig{Service: "api-mcp.test", Account: "default", PromptOnMissing: true},
+		CredentialMissing: true,
+	}
+	store := &fakeKeychainStore{values: map[string][]byte{keychainTestKey(*cfg.Auth.Keychain): []byte("top-secret-credential")}}
+	result := callToolForTest(t, cfg, store, &fakeCredentialPrompter{}, diagnosticsToolName)
+	if result.IsError {
+		t.Fatalf("diagnostics failed: %+v", result.Content)
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte("top-secret-credential")) {
+		t.Fatalf("diagnostics leaked credential: %s", data)
+	}
+	if !bytes.Contains(data, []byte(`"operationCount"`)) || !bytes.Contains(data, []byte(`"maxResponseBytes"`)) {
+		t.Fatalf("diagnostics omitted runtime details: %s", data)
+	}
+	if !bytes.Contains(data, []byte(`"storedInKeychain":true`)) {
+		t.Fatalf("diagnostics did not report stored credential status: %s", data)
+	}
+}
+
+func TestDiagnosticsToolNameIsReserved(t *testing.T) {
+	if !isReservedToolName(diagnosticsToolName) {
+		t.Fatalf("%s must be reserved", diagnosticsToolName)
+	}
+}
+
 func TestCreateServerMarksMutatingOpenAPIOperationsAsDestructive(t *testing.T) {
 	cfg := Config{
 		Name:             "example-api-mcp",
@@ -79,10 +115,16 @@ func TestCreateServerRegistersFilteredToolsWithPluralHeadersInput(t *testing.T) 
 	}
 
 	tools := listToolsForTest(t, cfg)
-	if got, want := len(tools), 1; got != want {
-		t.Fatalf("tool count = %d, want %d", got, want)
+	if findTool(tools, diagnosticsToolName) == nil {
+		t.Fatalf("missing %s tool", diagnosticsToolName)
 	}
-	tool := tools[0]
+	if findTool(tools, "update_widget") != nil {
+		t.Fatal("filtered update_widget tool was registered")
+	}
+	tool := findTool(tools, "get_widget")
+	if tool == nil {
+		t.Fatal("missing get_widget tool")
+	}
 	if got, want := tool.Name, "get_widget"; got != want {
 		t.Fatalf("tool = %q, want %q", got, want)
 	}

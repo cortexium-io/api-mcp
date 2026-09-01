@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/cortexium-io/api-mcp/internal/apimcp"
+	"github.com/cortexium-io/api-mcp/apimcp"
 )
 
 var (

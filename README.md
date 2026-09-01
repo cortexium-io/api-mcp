@@ -302,6 +302,12 @@ The MCP tool list is the union of operations enabled by all configured profiles.
 
 Adding, renaming, or removing a profile also requires a separate native macOS approval showing the selected account and exact arguments. Profile and policy mutations update the current server process immediately. Other already-running api-mcp processes should be restarted to reload changes made by another client or by manual file edits.
 
+## Runtime Diagnostics
+
+Every server exposes `api_mcp_diagnostics`. It reports the running implementation name and version, OpenAPI file and operation count, response-size limit, credential availability, profile identities, and current feature policies. It never returns credential material.
+
+The tool describes the process that received the call. A client attaching an older process, or blocking a call before dispatch, cannot be detected from inside that process; compare the returned implementation/spec details with the installed plugin and restart the client when they differ.
+
 ## Tool Input
 
 Generated tools use a stable input shape:
@@ -318,6 +324,18 @@ Generated tools use a stable input shape:
 ```
 
 OpenAPI parameters are grouped by location. Generated tools reject undeclared top-level fields, undeclared parameters, missing required values, unsupported content types, and parameter/body values that fail their OpenAPI schemas before resolving credentials or sending HTTP. Auth credentials are applied from config and are not exposed as tool inputs.
+
+## Response Completeness
+
+`maxResponseChars` is enforced as a byte limit. When an upstream body exceeds it, api-mcp discards the partial body, returns `ok: false`, and includes structured `truncation` metadata with code `response_body_truncated` and retry advice. Partial JSON is never returned as a valid collection.
+
+When a JSON response contains supported paging metadata such as `meta.paging`, api-mcp also returns normalized `pagination` metadata. `finalPage` is true only when both the current page and page count prove it. Missing paging metadata is not evidence that a collection is complete.
+
+## Custom Workflow Host
+
+The public `github.com/cortexium-io/api-mcp/apimcp` package lets a thin API-specific binary register custom MCP tools without owning credentials, profile state, policy enforcement, or HTTP transport. Extensions can execute enabled read operations or submit one exact write batch. A batch is fully validated first, receives one native approval showing every item, and only then resolves credentials and performs those exact calls.
+
+There is intentionally no public unconfirmed-write method. API-specific review and preview/commit logic belongs in the API plugin, while api-mcp retains the shared security boundary.
 
 ## Run
 
