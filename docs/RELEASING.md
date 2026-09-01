@@ -36,8 +36,8 @@ The workflow validates semantic-version tag syntax and refuses a tag whose commi
 4. Create and push the annotated beta tag:
 
    ```bash
-   git tag -a v0.1.0-beta.1 -m "api-mcp v0.1.0-beta.1"
-   git push origin v0.1.0-beta.1
+   git tag -a v0.1.0-beta.2 -m "api-mcp v0.1.0-beta.2"
+   git push origin v0.1.0-beta.2
    ```
 
 5. Review and approve the `release` environment deployment, then confirm the release workflow succeeds.
