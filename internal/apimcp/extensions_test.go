@@ -172,6 +172,70 @@ func TestExtensionBatchEnforcesCurrentToolPolicy(t *testing.T) {
 	}
 }
 
+func TestExtensionBatchRechecksPolicyAfterApprovalBeforeCredentialRead(t *testing.T) {
+	store := &fakeKeychainStore{values: map[string][]byte{}}
+	prompter := &fakeCredentialPrompter{value: []byte("secret")}
+	runtime := extensionRuntimeForTest(t, "https://api.example.test", store, prompter, &fakeActionConfirmer{})
+	directory := t.TempDir()
+	catalogPath := filepath.Join(directory, "features.json")
+	operations := make([]OperationDescriptor, 0, len(runtime.operations))
+	for _, operation := range runtime.operations {
+		operations = append(operations, operation)
+	}
+	if err := writeJSONFileAtomically(catalogPath, ToolFeatureCatalog{
+		Version: toolPolicyVersion,
+		Features: []ToolFeature{{
+			ID:          "record-writes",
+			Title:       "Record writes",
+			Description: "Write test records.",
+			Risk:        "write",
+			Endpoints:   []string{"delete_widget"},
+		}},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := newToolPolicyManager(ResolvedToolPolicyConfig{
+		UserConfigPath:  filepath.Join(directory, "policy.json"),
+		CatalogPath:     catalogPath,
+		DefaultFeatures: []string{"record-writes"},
+	}, operations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.policy = policy
+	runtime.filter = policy.filter()
+	confirmer := &fakeActionConfirmer{onConfirm: func() {
+		if _, _, err := policy.configure(ConfigureToolsInput{RemoveEndpoints: []string{"delete_widget"}}); err != nil {
+			t.Fatalf("disable policy after approval: %v", err)
+		}
+	}}
+	runtime.confirmer = confirmer
+	auth := ResolvedAuthConfig{
+		Type:              "apiKey",
+		In:                "headers",
+		Name:              "X-API-Key",
+		Keychain:          &KeychainConfig{Service: "api-mcp.test", Account: "default", PromptOnMissing: true},
+		CredentialMissing: true,
+	}
+	runtime.config.Auth = auth
+	runtime.credentials = newCredentialManager(runtime.config.Name, auth, store, prompter)
+
+	_, err = runtime.ExecuteBatch(context.Background(), ExtensionBatchRequest{
+		Action: "Delete a record",
+		Items: []ExtensionBatchItem{{
+			ID:        "one",
+			Operation: "delete_widget",
+			Input:     ToolInput{Path: map[string]any{"id": "one"}},
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "disabled or invalidated after approval") {
+		t.Fatalf("post-approval policy error = %v", err)
+	}
+	if len(confirmer.confirmations) != 1 || store.getCalls != 0 || prompter.calls != 0 {
+		t.Fatalf("protected boundary crossed: confirmations=%d keychainGets=%d prompts=%d", len(confirmer.confirmations), store.getCalls, prompter.calls)
+	}
+}
+
 func extensionRuntimeForTest(t *testing.T, serverURL string, store KeychainStore, prompter CredentialPrompter, confirmer ActionConfirmer) *ExtensionRuntime {
 	t.Helper()
 	cfg := Config{

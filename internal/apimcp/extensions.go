@@ -168,6 +168,16 @@ func (r *ExtensionRuntime) ExecuteBatch(ctx context.Context, request ExtensionBa
 	}); err != nil {
 		return nil, errors.New(actionConfirmationError(err))
 	}
+	for i, item := range request.Items {
+		operation, err := r.validateEnabledOperation(request.Profile, item.Operation, item.Input)
+		if err != nil {
+			return nil, fmt.Errorf("batch item %q was disabled or invalidated after approval: %w", item.ID, err)
+		}
+		if isReadOnlyMethod(operation.Method) {
+			return nil, fmt.Errorf("batch item %q changed to a read-only operation after approval", item.ID)
+		}
+		operations[i] = operation
+	}
 
 	auth, selectedProfile, err := r.authForRequest(ctx, request.Profile)
 	if err != nil {

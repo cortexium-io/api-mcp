@@ -788,9 +788,13 @@ func stringSlice(value any) []string {
 type fakeActionConfirmer struct {
 	err           error
 	confirmations []ActionConfirmation
+	onConfirm     func()
 }
 
 func (f *fakeActionConfirmer) Confirm(_ context.Context, confirmation ActionConfirmation) error {
 	f.confirmations = append(f.confirmations, confirmation)
+	if f.onConfirm != nil {
+		f.onConfirm()
+	}
 	return f.err
 }
