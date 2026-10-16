@@ -1,10 +1,12 @@
 package apimcp
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -159,8 +161,8 @@ func loadConfigInputFile(configPath string) (ConfigInput, string, error) {
 		return ConfigInput{}, "", err
 	}
 
-	var input ConfigInput
-	if err := json.Unmarshal(data, &input); err != nil {
+	input, err := decodeConfigInput(data)
+	if err != nil {
 		return ConfigInput{}, "", err
 	}
 	return input, filepath.Dir(absolutePath), nil
@@ -182,8 +184,8 @@ func loadEmbeddedConfigInput() (ConfigInput, error) {
 	if err != nil {
 		return ConfigInput{}, fmt.Errorf("decode embedded config: %w", err)
 	}
-	var input ConfigInput
-	if err := json.Unmarshal(data, &input); err != nil {
+	input, err := decodeConfigInput(data)
+	if err != nil {
 		return ConfigInput{}, fmt.Errorf("parse embedded config: %w", err)
 	}
 	return input, nil
@@ -199,8 +201,8 @@ func EmbeddedConfigForFile(configPath string) (string, error) {
 		return "", err
 	}
 
-	var input ConfigInput
-	if err := json.Unmarshal(data, &input); err != nil {
+	input, err := decodeConfigInput(data)
+	if err != nil {
 		return "", err
 	}
 	if input.Spec == "" {
@@ -215,6 +217,24 @@ func EmbeddedConfigForFile(configPath string) (string, error) {
 		return "", err
 	}
 	return base64.StdEncoding.EncodeToString(compact), nil
+}
+
+func decodeConfigInput(data []byte) (ConfigInput, error) {
+	var input ConfigInput
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		return ConfigInput{}, err
+	}
+	// Like json.Unmarshal, require exactly one JSON value.
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err != nil {
+			return ConfigInput{}, err
+		}
+		return ConfigInput{}, errors.New("config must contain a single JSON value")
+	}
+	return input, nil
 }
 
 func NormalizeConfig(input ConfigInput, baseDir string, lookup LookupEnv) (Config, error) {

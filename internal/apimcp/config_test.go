@@ -356,6 +356,68 @@ func TestFindConfigPathRejectsUnexpectedArgument(t *testing.T) {
 	}
 }
 
+func TestConfigLoadersRejectInvalidJSON(t *testing.T) {
+	previous := EmbeddedConfigBase64
+	t.Cleanup(func() { EmbeddedConfigBase64 = previous })
+	const secret = "sentinel-config-secret"
+
+	for _, tc := range []struct {
+		name      string
+		fields    string
+		suffix    string
+		wantError string
+	}{
+		{"top-level typo", `"serverUrll":"ignored"`, "", `unknown field "serverUrll"`},
+		{"auth typo", `"auth":{"type":"bearer","token":"inline-token","tokenEnn":"API_TOKEN"}`, "", `unknown field "tokenEnn"`},
+		{"keychain typo", `"auth":{"type":"bearer","token":"inline-token","keychain":{"service":"test","account":"default","promptOnMisssing":true}}`, "", `unknown field "promptOnMisssing"`},
+		{"tools typo", `"tools":{"incldue":["GET *"]}`, "", `unknown field "incldue"`},
+		{"tool policy typo", `"toolPolicy":{"userConfigDirectory":"Test API","catalog":"features.json","defaultFeaturess":[]}`, "", `unknown field "defaultFeaturess"`},
+		{"profiles typo", `"profiles":{"registryFille":"accounts.json"}`, "", `unknown field "registryFille"`},
+		{"extra JSON value", `"name":"example"`, `{}`, "single JSON value"},
+		{"trailing garbage", `"name":"example"`, `!`, "invalid character"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := []byte(`{"spec":"openapi.json","headers":{"Authorization":"` + secret + `"},` + tc.fields + `}` + tc.suffix)
+			configPath := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(configPath, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			EmbeddedConfigBase64 = base64.StdEncoding.EncodeToString(data)
+			lookup := mapLookup(map[string]string{})
+			for _, loader := range []struct {
+				name string
+				load func() error
+			}{
+				{"file", func() error {
+					_, err := LoadConfigFile(configPath, lookup)
+					return err
+				}},
+				{"embedded", func() error {
+					_, err := LoadEmbeddedConfig(lookup)
+					return err
+				}},
+				{"preparation", func() error {
+					_, err := EmbeddedConfigForFile(configPath)
+					return err
+				}},
+			} {
+				t.Run(loader.name, func(t *testing.T) {
+					err := loader.load()
+					if err == nil {
+						t.Fatal("expected invalid configuration to be rejected")
+					}
+					if strings.Contains(err.Error(), secret) {
+						t.Fatal("configuration error exposed the sentinel credential")
+					}
+					if !strings.Contains(err.Error(), tc.wantError) {
+						t.Fatalf("error = %v, want %q", err, tc.wantError)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestEmbeddedConfigForFileAbsolutizesSpecWithoutResolvingSecrets(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
@@ -432,40 +494,59 @@ func TestLoadConfigFromArgsUsesEmbeddedConfigWhenNoConfigIsProvided(t *testing.T
 	}
 }
 
-func TestEmbeddedConfigCanIncludeInlineCredentials(t *testing.T) {
+func TestFileAndEmbeddedConfigPreserveInlineCredentialsAndHeaders(t *testing.T) {
 	previous := EmbeddedConfigBase64
 	t.Cleanup(func() { EmbeddedConfigBase64 = previous })
 
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(configPath, []byte(`{
-		"spec": "openapi.json",
-		"auth": {
-			"type": "apiKey",
-			"in": "headers",
-			"name": "X-API-Key",
-			"value": "embedded-secret"
-		}
-	}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	encoded, err := EmbeddedConfigForFile(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	EmbeddedConfigBase64 = encoded
-	t.Setenv("API_MCP_CONFIG", "")
-
-	cfg, err := LoadConfigFromArgs(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Auth.Type != "apiKey" || cfg.Auth.In != "headers" || cfg.Auth.Name != "X-API-Key" {
-		t.Fatalf("unexpected auth config: %+v", cfg.Auth)
-	}
-	if got, want := cfg.Auth.Value, "embedded-secret"; got != want {
-		t.Fatalf("auth value = %q, want %q", got, want)
+	for name, auth := range map[string]AuthConfig{
+		"API key": {Type: "apiKey", In: "headers", Name: "X-API-Key", Value: "embedded-secret"},
+		"custom headers": {Type: "headers", Headers: map[string]string{
+			"X-Custom-Auth": "embedded-secret",
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := ConfigInput{
+				Spec:    "openapi.json",
+				Auth:    &auth,
+				Headers: map[string]string{"X-Custom-Trace": "trace-1"},
+			}
+			data, err := json.Marshal(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Trailing whitespace remains valid with strict decoding.
+			data = append(data, '\n', '\t')
+			configPath := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(configPath, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			lookup := mapLookup(map[string]string{})
+			fileConfig, err := LoadConfigFile(configPath, lookup)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := EmbeddedConfigForFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			EmbeddedConfigBase64 = encoded
+			cfg, err := LoadEmbeddedConfig(lookup)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, fileConfig) {
+				t.Fatal("file and embedded configurations differ")
+			}
+			if !reflect.DeepEqual(cfg.Headers, input.Headers) {
+				t.Fatalf("headers = %#v, want %#v", cfg.Headers, input.Headers)
+			}
+			if cfg.Auth.Type != auth.Type || cfg.Auth.In != auth.In || cfg.Auth.Name != auth.Name || cfg.Auth.Value != auth.Value {
+				t.Fatalf("unexpected auth config: %+v", cfg.Auth)
+			}
+			if !reflect.DeepEqual(cfg.Auth.Headers, auth.Headers) {
+				t.Fatal("custom auth headers were not preserved")
+			}
+		})
 	}
 }
 
