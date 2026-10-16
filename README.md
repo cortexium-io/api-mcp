@@ -84,6 +84,8 @@ For local OpenAPI specs, the build-time helper stores an absolute spec path in t
 
 Create `api-mcp.config.json` or pass `--config path/to/config.json`.
 
+Configuration fields are checked when loading a file, loading embedded config, or preparing config for embedding. Unknown fields at the top level or inside objects such as `auth`, `auth.keychain`, `tools`, `toolPolicy`, and `profiles` are rejected with an error naming the field. This deliberately tightens compatibility: fields that were previously silently ignored must now be corrected or removed. Arbitrary header names remain valid in `headers` and `auth.headers`.
+
 ```json
 {
   "name": "my-api-mcp",
@@ -359,8 +361,8 @@ For vulnerabilities, see [SECURITY.md](SECURITY.md).
 ## Development
 
 ```bash
-GOTOOLCHAIN=go1.27.0 go test ./...
-GOTOOLCHAIN=go1.27.0 go vet ./...
+GOTOOLCHAIN=go1.27.2 go test ./...
+GOTOOLCHAIN=go1.27.2 go vet ./...
 ```
 
 Maintainer release instructions are in [docs/RELEASING.md](docs/RELEASING.md).
